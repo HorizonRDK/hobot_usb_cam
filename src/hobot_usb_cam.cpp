@@ -57,8 +57,41 @@ bool HobotUSBCam::Init(CamInformation &cam_information) {
   cam_information_ = cam_information;
   // memcpy(&cam_information_, cam_information, sizeof(CamInformation));
 
-  if (OpenDevice() == false) return false;
+  video_dev_ = cam_information_.dev;
+  RCLCPP_WARN_STREAM(rclcpp::get_logger("hobot_usb_cam"),
+              "Start to open device " << video_dev_ << ".");
+  if (OpenDevice() == false) {
+    RCLCPP_ERROR_STREAM(rclcpp::get_logger("hobot_usb_cam"),
+                "Open device " << video_dev_ << " fail!");
+    // 遍历/dev/下的video设备
+    // 使用 find 命令查找/dev/下的video设备
+    std::string command = "find /dev -name \"video[0-9]*\" | sort";
+    FILE* fp = popen(command.c_str(), "r");
+    if (!fp) {
+      return false;
+    }
+    
+    size_t video_dev_len = 20;
+    char* video_dev = new char[video_dev_len];
+    size_t ret_len = 0;
+    while ((ret_len = getline(&video_dev, &video_dev_len, fp)) != -1) {
+      video_dev_ = std::string(video_dev, ret_len - 1);
+      RCLCPP_WARN_STREAM(rclcpp::get_logger("hobot_usb_cam"),
+                  "Try to open device [" << video_dev_ << "]");
+      memset(video_dev, '0', video_dev_len);
+      if (OpenDevice() == true) {
+        // 打开成功
+        RCLCPP_WARN_STREAM(rclcpp::get_logger("hobot_usb_cam"),
+                    "Open device " << video_dev_ << " success.");
+        break;
+      }
+    }
+    delete []video_dev;
+  }
+
   if (InitDevice() == false) {
+    RCLCPP_ERROR_STREAM(rclcpp::get_logger("hobot_usb_cam"),
+                "InitDevice " << video_dev_ << " fail!");
     CloseDevice();
     return false;
   }
@@ -163,13 +196,13 @@ bool HobotUSBCam::CheckResolutionFromFormats(int width, int height) {
   return false;
 }
 
-bool HobotUSBCam::OpenDevice(void) {
+bool HobotUSBCam::OpenDevice() {
   struct stat dev_stat;
-  if (stat(cam_information_.dev.c_str(), &dev_stat) == -1) {
+  if (stat(video_dev_.c_str(), &dev_stat) == -1) {
     RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
                  "Cannot identify '%s': %d, %s! Please make sure the "
-                 "video_device parameter is correct!\\n",
-                 cam_information_.dev.c_str(),
+                 "video_device parameter is correct!",
+                 video_dev_.c_str(),
                  errno,
                  strerror(errno));
     return false;
@@ -177,18 +210,18 @@ bool HobotUSBCam::OpenDevice(void) {
   if (!S_ISCHR(dev_stat.st_mode)) {
     RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
                  "%s is not a character device! Please make sure the "
-                 "video_device parameter is correct!\n",
-                 cam_information_.dev.c_str(),
+                 "video_device parameter is correct!",
+                 video_dev_.c_str(),
                  errno,
                  strerror(errno));
     return false;
   }
-  cam_fd_ = open(cam_information_.dev.c_str(), O_RDWR | O_NONBLOCK, 0);
+  cam_fd_ = open(video_dev_.c_str(), O_RDWR | O_NONBLOCK, 0);
   if (cam_fd_ == -1) {
     RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
                  "Cannot open '%s': %d, %s! Please make sure the video_device "
-                 "parameter is correct!\\n",
-                 cam_information_.dev.c_str(),
+                 "parameter is correct!",
+                 video_dev_.c_str(),
                  errno,
                  strerror(errno));
     return false;
@@ -210,8 +243,8 @@ bool HobotUSBCam::InitDevice() {
                    "%s is no V4L2 device! Please use the v4l2 command "
                    "'sudo v4l2-ctl -d %s --all' to confirm that"
                    " the USB camera is working\\n",
-                   cam_information_.dev.c_str(),
-                   cam_information_.dev.c_str());
+                   video_dev_.c_str(),
+                   video_dev_.c_str());
       return false;
     } else {
       errno_exit("VIDIOC_QUERYCAP");
@@ -223,8 +256,8 @@ bool HobotUSBCam::InitDevice() {
                  "%s is no video capture device! Please use the v4l2 command "
                  "'sudo v4l2-ctl -d %s --all' to confirm that"
                  " the USB camera is working\\n",
-                 cam_information_.dev.c_str(),
-                 cam_information_.dev.c_str());
+                 video_dev_.c_str(),
+                 video_dev_.c_str());
     return false;
   }
 
@@ -236,8 +269,8 @@ bool HobotUSBCam::InitDevice() {
             "%s does not support read i/o! Please use the v4l2 command "
             "'sudo v4l2-ctl -d %s --all' to confirm that"
             " the USB camera is working\\n",
-            cam_information_.dev.c_str(),
-            cam_information_.dev.c_str());
+            video_dev_.c_str(),
+            video_dev_.c_str());
         return false;
       }
       break;
@@ -250,8 +283,8 @@ bool HobotUSBCam::InitDevice() {
             "%s does not support streaming i/o! Please use the v4l2 command "
             "'sudo v4l2-ctl -d %s --all' to confirm that"
             " the USB camera is working\\n",
-            cam_information_.dev.c_str(),
-            cam_information_.dev.c_str());
+            video_dev_.c_str(),
+            video_dev_.c_str());
         return false;
       }
       break;
@@ -480,7 +513,7 @@ bool HobotUSBCam::InitMmap(void) {
     if (EINVAL == errno) {
       RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
                    "%s does not support memory mappingn\\n",
-                   cam_information_.dev.c_str());
+                   video_dev_.c_str());
       return false;
     } else {
       errno_exit("VIDIOC_REQBUFS");
@@ -525,7 +558,7 @@ bool HobotUSBCam::InitUserspace(unsigned int buffer_size) {
     if (EINVAL == errno) {
       RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
                    "%s does not support user pointer i/on\\n",
-                   cam_information_.dev.c_str());
+                   video_dev_.c_str());
       return false;
     } else {
       errno_exit("VIDIOC_REQBUFS");
@@ -833,10 +866,10 @@ bool HobotUSBCam::ReadCalibrationFile(
     std::string camera_name;
     std::ifstream fin(file_path.c_str());
     if (!fin) {
-      RCLCPP_ERROR(
+      RCLCPP_WARN(
           rclcpp::get_logger("hobot_usb_cam"),
-          "Camera calibration file: %s does not exist! Please make sure the "
-          "calibration file path is correct and the calibration file exists!",
+          "Camera calibration file: [%s] does not exist!"
+          "\nIf you need calibration msg, please make sure the calibration file path is correct and the calibration file exists!",
           file_path.c_str());
       return false;
     }

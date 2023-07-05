@@ -77,7 +77,7 @@ class HobotUSBCam {
  private:
   int32_t xioctl(int fh, uint32_t request, void *arg);
   void errno_exit(const char *s);
-  bool OpenDevice(void);
+  bool OpenDevice();
   bool InitDevice(void);
   bool InitRead(unsigned int buffer_size);
   bool InitMmap(void);
@@ -105,6 +105,7 @@ class HobotUSBCam {
   CamState cam_state_;
   std::mutex cam_mutex_;
   CamInformation cam_information_;
+  std::string video_dev_;
   int cam_fd_;
   int buffer_numbers_;
   CamBuffer *buffers_;
