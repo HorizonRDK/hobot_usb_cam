@@ -72,6 +72,6 @@ def generate_launch_description():
                 {"video_device": LaunchConfiguration('usb_video_device')},
                 {"zero_copy": LaunchConfiguration('usb_zero_copy')}
             ],
-            arguments=['--ros-args', '--log-level', 'error']
+            arguments=['--ros-args', '--log-level', 'warn']
         )
     ])

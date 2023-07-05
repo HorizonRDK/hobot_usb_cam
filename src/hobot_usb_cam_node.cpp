@@ -60,6 +60,7 @@ HobotUSBCamNode::HobotUSBCamNode(const rclcpp::NodeOptions &ndoe_options)
   cam_information.pixel_format = pixel_format_name_;
   if (cam_.Init(cam_information) == false) {
     RCLCPP_ERROR(this->get_logger(), "Hobot USB Cam Init failed\n\n");
+    rclcpp::shutdown();
     return;
   }
   cam_node_state_ = kSTATE_INITIALLED;
@@ -273,7 +274,7 @@ void HobotUSBCamNode::ReadFrame() {
             RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
                         "publish camera info.\n");
           } else {
-            RCLCPP_WARN(rclcpp::get_logger("hobot_usb_cam"),
+            RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
                         "Unable to publish camera info.\n");
           }
         }
@@ -305,10 +306,10 @@ void HobotUSBCamNode::ReadFrame() {
             camera_calibration_info.header.frame_id = frame_id_;
             info_pub_->publish(camera_calibration_info);
             RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
-                        "publish camera info.\n");
+                        "publish camera info.");
           } else {
-            RCLCPP_WARN(rclcpp::get_logger("hobot_usb_cam"),
-                        "Unable to publish camera info.\n");
+            RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
+                        "Unable to publish camera info.");
           }
         }
       } else {
@@ -339,10 +340,10 @@ void HobotUSBCamNode::ReadFrame() {
             camera_calibration_info.header.frame_id = frame_id_;
             info_pub_->publish(camera_calibration_info);
             RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
-                        "publish camera info.\n");
+                        "publish camera info.");
           } else {
-            RCLCPP_WARN(rclcpp::get_logger("hobot_usb_cam"),
-                        "Unable to publish camera info.\n");
+            RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
+                        "Unable to publish camera info.");
           }
         }
       }
@@ -378,8 +379,8 @@ void HobotUSBCamNode::ReadFrame() {
         RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
                     "publish camera info.\n");
       } else {
-        RCLCPP_WARN(rclcpp::get_logger("hobot_usb_cam"),
-                    "Unable to publish camera info.\n");
+        RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
+                    "Unable to publish camera info.");
       }
     }
     RCLCPP_INFO(this->get_logger(),
