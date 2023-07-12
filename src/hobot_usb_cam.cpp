@@ -76,7 +76,7 @@ bool HobotUSBCam::Init(CamInformation &cam_information) {
     }
     size_t video_dev_len = 20;
     char* video_dev = new char[video_dev_len];
-    size_t ret_len = 0;
+    int ret_len = 0;
     while ((ret_len = getline(&video_dev, &video_dev_len, fp)) > 0) {
       video_dev_ = std::string(video_dev, ret_len - 1);
       RCLCPP_WARN_STREAM(rclcpp::get_logger("hobot_usb_cam"),
