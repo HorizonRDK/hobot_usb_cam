@@ -45,7 +45,6 @@ HobotUSBCam::HobotUSBCam()
 HobotUSBCam::~HobotUSBCam() { delete[] buffers_; }
 
 bool HobotUSBCam::Init(CamInformation &cam_information) {
-  bool ret = true;
   std::lock_guard<std::mutex> lock(cam_mutex_);
   if (cam_state_ != kSTATE_UNINITIALLED) {
     RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
@@ -58,11 +57,16 @@ bool HobotUSBCam::Init(CamInformation &cam_information) {
   // memcpy(&cam_information_, cam_information, sizeof(CamInformation));
 
   video_dev_ = cam_information_.dev;
+
+  // 打开并且初始化USB设备成功的标志
+  bool init_success = false;
   RCLCPP_WARN_STREAM(rclcpp::get_logger("hobot_usb_cam"),
               "Start to open device " << video_dev_ << ".");
-  if (OpenDevice() == false) {
+  if (!OpenDevice() || !InitDevice()) {
     RCLCPP_ERROR_STREAM(rclcpp::get_logger("hobot_usb_cam"),
-                "Open device " << video_dev_ << " fail!");
+                "Open/Init device " << video_dev_ << " fail!");
+    CloseDevice();
+
     // 遍历/dev/下的video设备
     // 使用 find 命令查找/dev/下的video设备
     std::string command = "find /dev -name \"video[0-9]*\" | sort";
@@ -70,39 +74,40 @@ bool HobotUSBCam::Init(CamInformation &cam_information) {
     if (!fp) {
       return false;
     }
-    
     size_t video_dev_len = 20;
     char* video_dev = new char[video_dev_len];
     size_t ret_len = 0;
-    while ((ret_len = getline(&video_dev, &video_dev_len, fp)) != -1) {
+    while ((ret_len = getline(&video_dev, &video_dev_len, fp)) > 0) {
       video_dev_ = std::string(video_dev, ret_len - 1);
       RCLCPP_WARN_STREAM(rclcpp::get_logger("hobot_usb_cam"),
                   "Try to open device [" << video_dev_ << "]");
       memset(video_dev, '0', video_dev_len);
-      if (OpenDevice() == true) {
-        // 打开成功
+      if (OpenDevice() && InitDevice()) {
         RCLCPP_WARN_STREAM(rclcpp::get_logger("hobot_usb_cam"),
-                    "Open device " << video_dev_ << " success.");
+                    "Open & Init device " << video_dev_ << " success.");
+        init_success = true;
         break;
       }
     }
     delete []video_dev;
+  } else {
+    RCLCPP_WARN_STREAM(rclcpp::get_logger("hobot_usb_cam"),
+                "Open & Init device " << video_dev_ << " success.");
+    init_success = true;
   }
 
-  if (InitDevice() == false) {
-    RCLCPP_ERROR_STREAM(rclcpp::get_logger("hobot_usb_cam"),
-                "InitDevice " << video_dev_ << " fail!");
-    CloseDevice();
+  if (!init_success) {
     return false;
   }
+
   cam_information = cam_information_;
   cam_state_ = kSTATE_INITIALLED;
-  return ret;
+  return true;
 }
 
 void HobotUSBCam::GetFormats() {
   RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
-              "This Cameras Supported Formats:");
+              "This Camera Supported Formats:");
   struct v4l2_fmtdesc fmt;
   fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   fmt.index = 0;
@@ -200,7 +205,7 @@ bool HobotUSBCam::OpenDevice() {
   struct stat dev_stat;
   if (stat(video_dev_.c_str(), &dev_stat) == -1) {
     RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
-                 "Cannot identify '%s': %d, %s! Please make sure the "
+                 "Cannot identify '%s', errno: %d, err info: %s! Please make sure the "
                  "video_device parameter is correct!",
                  video_dev_.c_str(),
                  errno,
@@ -253,9 +258,9 @@ bool HobotUSBCam::InitDevice() {
 
   if (!(camera_capability.capabilities & V4L2_CAP_VIDEO_CAPTURE)) {
     RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
-                 "%s is no video capture device! Please use the v4l2 command "
+                 "%s is not video capture device! Please use the v4l2 command "
                  "'sudo v4l2-ctl -d %s --all' to confirm that"
-                 " the USB camera is working\\n",
+                 " the USB camera is working.",
                  video_dev_.c_str(),
                  video_dev_.c_str());
     return false;
@@ -473,7 +478,7 @@ int32_t HobotUSBCam::xioctl(int fh, uint32_t request, void *arg) {
 
 void HobotUSBCam::errno_exit(const char *s) {
   RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
-               "%s error %d, %s\\n",
+               "%s error %d, %s",
                s,
                errno,
                strerror(errno));
@@ -586,6 +591,12 @@ bool HobotUSBCam::InitUserspace(unsigned int buffer_size) {
 }
 
 bool HobotUSBCam::CloseDevice(void) {
+  if (cam_fd_ == -1) {
+    RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
+                 "Camera fd is invalid, no need to close.");
+    return true;
+  }
+
   if (close(cam_fd_) == -1) {
     errno_exit("close");
     return false;

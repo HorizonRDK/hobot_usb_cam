@@ -106,7 +106,7 @@ class HobotUSBCam {
   std::mutex cam_mutex_;
   CamInformation cam_information_;
   std::string video_dev_;
-  int cam_fd_;
+  int cam_fd_ = -1;
   int buffer_numbers_;
   CamBuffer *buffers_;
 };
