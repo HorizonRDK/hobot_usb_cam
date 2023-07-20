@@ -4,27 +4,27 @@ hobot_usb_cam从USB摄像头采集图像数据，以ROS标准图像消息或者�
 
 # 物料清单
 
-- USB摄像头，自行采购。
-
-- [RDK X3](https://developer.horizon.cc/sunrise)
-
+| 序号 | 名称   | 生产厂家 | 参考链接                                                     |
+| ---- | ------ | -------- | ------------------------------------------------------------ |
+| 1    | USB摄像头    | 多厂家 | 自行选择 |
+| 2    | RDK X3 | 多厂家 | [点击跳转](https://developer.horizon.cc/rdkx3) |
 
 # 使用方法
 
-## 硬件连接
+## 硬件组装
 
-将USB摄像头连接到RDK X3的USB插槽。
+将USB摄像头连接到RDK的USB插槽。
 
-## 功能安装
+## 安装功能包
 
-在RDK系统的终端中运行如下指令，即可快速安装：
+启动RDK后，通过终端或者VNC连接RDK，复制如下命令在RDK的系统上运行，完成相关Node的安装。
 
 ```bash
 sudo apt update
 sudo apt install -y tros-hobot-usb-cam
 ```
 
-## 启动相机
+## 使用USB摄像头发布图片
 
 在RDK系统的终端中运行如下指令，启动已连接的相机：
 
@@ -52,13 +52,11 @@ hobot_usb_cam.launch.py配置默认输出640x480分辨率mjpeg格式图像，发
 [hobot_usb_cam-1] [WARN] [1689676255.596271213] [hobot_usb_cam]: Open & Init device /dev/video8 success.
 ```
 
-## 图像可视化
-
-### 使用WEB浏览器
+## 查看效果
 
 这里采用web端方式实现图像可视化，另起一个终端用于webservice发布。
 
- 打开一个新的终端，启动如下命令：
+打开一个新的终端，启动如下命令：
 
 ```shell
 source /opt/tros/local_setup.bash
@@ -66,8 +64,8 @@ source /opt/tros/local_setup.bash
 ros2 launch websocket websocket.launch.py websocket_image_topic:=/image websocket_only_show_image:=true
 ```
 
-PC打开浏览器（chrome/firefox/edge）输入<http://IP:8000>（IP为地平线RDK IP地址），点击左上方`Web 展示端`即可看到USB摄像头输出的实时画面：
-    ![web_usb](./image/web_usb.png "实时图像")
+打开同一网络电脑的浏览器，访问IP地址（浏览器输入http://IP:8000，IP为地平线RDK IP地址），点击左上方`Web 展示端`即可看到USB摄像头输出的实时画面：
+     ![web_usb](./image/web_usb.png "实时图像")
 
 
 # 接口说明
@@ -79,21 +77,20 @@ PC打开浏览器（chrome/firefox/edge）输入<http://IP:8000>（IP为地平�
 | ------------ | ------------------------------------ | ---------------------------------------- |
 | /camera_info | sensor_msgs/msg/CameraInfo           | 相机内参话题，根据设置的相机标定文件发布 |
 | /image_raw   | sensor_msgs/msg/Image                | 周期发布的图像话题，jpeg格式             |
-| /hbmem_image   | hbm_img_msgs/msg/HbmMsg1080P | 基于共享内存share mem的图像话题，jpeg格式        |
+| /hbmem_image   | [hbm_img_msgs/msg/HbmMsg1080P](https://github.com/HorizonRDK/hobot_msgs/blob/develop/hbm_img_msgs/msg/HbmMsg1080P.msg) | 基于共享内存share mem的图像话题，jpeg格式        |
 
 ## 参数
-
-| 名称                         | 参数值                                          | 说明                                               |
-| ---------------------------- | ----------------------------------------------- | -------------------------------------------------- |
-| frame_id                 | "default_usb_cam"（默认） | 消息标志符                         |
-| framerate                 | 30（默认） | 帧率                         |
-| image_width                  | 640（默认）                                    | 图像宽方向分辨率                                   |
-| image_height                 | 480（默认）                                    | 图像高方向分辨率                                   |
-| pixel_format                   | "mjpeg"（默认）                       | 发布图像编码方式                              |
-| io_method                    | mmap（默认）<br />read<br />userptr        | 从USB摄像头获取图像的io类型  |
-| zero_copy                    | True（默认）<br />False                      | 图像传输方式，配置shared_mem后将使用零拷贝机制传输 |
-| video_device | "/dev/video8"（默认）<br />"/dev/video0"等             | 设备驱动名称                                 |
-| camera_calibration_file_path | /opt/tros/lib/hobot_usb_cam/config/usb_camera_calibration.yaml（默认）                                      | 相机标定文件的路径                                 |
+| 参数名      | 解释             | 类型   | 支持的配置                 | 是否必须 | 默认值             |
+| ------------| -----------------| -------| --------------------------| -------- | -------------------|
+| frame_id    | 消息标志符       | string | 根据需要设置frame_id名字   | 否       | "default_usb_cam"  |
+| framerate   | 帧率             | int    | 根据sensor支持选择         | 否       | 30                 |
+| image_height| 图像高方向分辨率 | int    | 根据sensor支持选择         | 否       | 640                |
+| image_width | 图像宽方向分辨率 | int    | 根据sensor支持选择         | 否        | 480               |
+| io_method   | 从USB摄像头获取图像的io类型            | string | mmap/read/userptr          | 否       | "mmap"         |
+| pixel_format| 发布图像编码方式          | string | 当前只支持mjpeg            | 否        | “mjpeg”           |
+| video_device| 设备驱动名称     | string | 设备名称一般为/dev/videox  | 否        | "/dev/video0"     |
+| zero_copy   | 图像传输方式，配置shared_mem后将使用零拷贝机制传输   | bool   | True/False                 | 否       | "True"           |
+| camera_calibration_file_path  | 相机标定文件的存放路径  | string   | 根据实际的相机标定文件存放路径配置   | 否  | "/opt/tros/lib/hobot_usb_cam/config/usb_camera_calibration.yaml" |
 
 # 常见问题
 
