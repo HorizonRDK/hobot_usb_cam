@@ -200,11 +200,6 @@ bool HobotUSBCamNode::SetIOMethod(const std::string &io_method_name) {
 bool HobotUSBCamNode::SetPublisher() {
   if (zero_copy_enabled_) {
     if (cam_.CheckResolutionFromFormats(image_width_, image_height_)) {
-      hbmem_image_pub_1080_ =
-          this->create_publisher_hbmem<hbm_img_msgs::msg::HbmMsg1080P>(
-              "hbmem_image", 5);
-      hbmem_image_pub_540_ = nullptr;
-      hbmem_image_pub_480_ = nullptr;
       image_pub_ = nullptr;
     } else {
       RCLCPP_ERROR(this->get_logger(),
@@ -244,109 +239,6 @@ void HobotUSBCamNode::ReadFrame() {
         break;
     }
     if (zero_copy_enabled_) {
-      if (image_width_ == 1080) {
-        auto loanedMsg = hbmem_image_pub_1080_->borrow_loaned_message();
-        if (loanedMsg.is_valid()) {
-          auto &message = loanedMsg.get();
-          sensor_msgs::msg::CameraInfo camera_calibration_info;
-          message.height = 1080;
-          message.width = 1920;
-          message.step = 1920 * 3;
-          memcpy(message.encoding.data(), "jpeg", strlen("jpeg"));
-          message.time_stamp.sec = cam_buffer.reserved_buffer.timestamp.tv_sec;
-          message.time_stamp.nanosec =
-              cam_buffer.reserved_buffer.timestamp.tv_usec * 1000;
-          camera_calibration_info.header.stamp = message.time_stamp;
-          if (cam_buffer.length < message.step * message.height) {
-            memcpy(&message.data[0], cam_buffer.start, cam_buffer.length);
-            message.data_size = cam_buffer.length;
-          } else {
-            memcpy(&message.data[0],
-                   cam_buffer.start,
-                   message.step * message.height);
-            message.data_size = message.step * message.height;
-          }
-          hbmem_image_pub_1080_->publish(std::move(loanedMsg));
-          if (read_cam_calibration_enabled_ != false) {
-            camera_calibration_info = camera_calibration_info_;
-            camera_calibration_info.header.frame_id = frame_id_;
-            info_pub_->publish(camera_calibration_info);
-            RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
-                        "publish camera info.\n");
-          } else {
-            RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
-                        "Unable to publish camera info.\n");
-          }
-        }
-      } else if (image_width_ == 540) {
-        auto loanedMsg = hbmem_image_pub_1080_->borrow_loaned_message();
-        if (loanedMsg.is_valid()) {
-          auto &message = loanedMsg.get();
-          sensor_msgs::msg::CameraInfo camera_calibration_info;
-          message.height = 540;
-          message.width = 960;
-          message.step = 960 * 3;
-          memcpy(message.encoding.data(), "jpeg", strlen("jpeg"));
-          message.time_stamp.sec = cam_buffer.reserved_buffer.timestamp.tv_sec;
-          message.time_stamp.nanosec =
-              cam_buffer.reserved_buffer.timestamp.tv_usec * 1000;
-          camera_calibration_info.header.stamp = message.time_stamp;
-          if (cam_buffer.length < message.step * message.height) {
-            memcpy(&message.data[0], cam_buffer.start, cam_buffer.length);
-            message.data_size = cam_buffer.length;
-          } else {
-            memcpy(&message.data[0],
-                   cam_buffer.start,
-                   message.step * message.height);
-            message.data_size = message.step * message.height;
-          }
-          hbmem_image_pub_1080_->publish(std::move(loanedMsg));
-          if (read_cam_calibration_enabled_ != false) {
-            camera_calibration_info = camera_calibration_info_;
-            camera_calibration_info.header.frame_id = frame_id_;
-            info_pub_->publish(camera_calibration_info);
-            RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
-                        "publish camera info.");
-          } else {
-            RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
-                        "Unable to publish camera info.");
-          }
-        }
-      } else {
-        auto loanedMsg = hbmem_image_pub_1080_->borrow_loaned_message();
-        if (loanedMsg.is_valid()) {
-          auto &message = loanedMsg.get();
-          sensor_msgs::msg::CameraInfo camera_calibration_info;
-          message.height = 480;
-          message.width = 640;
-          message.step = 640 * 3;
-          memcpy(message.encoding.data(), "jpeg", strlen("jpeg"));
-          message.time_stamp.sec = cam_buffer.reserved_buffer.timestamp.tv_sec;
-          message.time_stamp.nanosec =
-              cam_buffer.reserved_buffer.timestamp.tv_usec * 1000;
-          camera_calibration_info.header.stamp = message.time_stamp;
-          if (cam_buffer.length < message.step * message.height) {
-            memcpy(&message.data[0], cam_buffer.start, cam_buffer.length);
-            message.data_size = cam_buffer.length;
-          } else {
-            memcpy(&message.data[0],
-                   cam_buffer.start,
-                   message.step * message.height);
-            message.data_size = message.step * message.height;
-          }
-          hbmem_image_pub_1080_->publish(std::move(loanedMsg));
-          if (read_cam_calibration_enabled_ != false) {
-            camera_calibration_info = camera_calibration_info_;
-            camera_calibration_info.header.frame_id = frame_id_;
-            info_pub_->publish(camera_calibration_info);
-            RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
-                        "publish camera info.");
-          } else {
-            RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
-                        "Unable to publish camera info.");
-          }
-        }
-      }
     } else {
       auto message = sensor_msgs::msg::Image();
       sensor_msgs::msg::CameraInfo camera_calibration_info;
@@ -364,6 +256,18 @@ void HobotUSBCamNode::ReadFrame() {
         size = cam_buffer.length;
         message.data.resize(size);
         memcpy(&message.data[0], cam_buffer.start, cam_buffer.length);
+
+        // static int32_t last_dump_sec = -1;
+        // if (last_dump_sec < 0 || (message.header.stamp.sec - last_dump_sec >= 5)) {
+        //   last_dump_sec = message.header.stamp.sec;
+        //   std::string fname = message.header.frame_id + "_" +
+        //     std::to_string(message.width) + "_" +
+        //     std::to_string(message.height) + "_" +
+        //     std::to_string(message.header.stamp.sec) + "_" +
+        //     std::to_string(message.header.stamp.nanosec) + ".jpeg";
+        //   std::ofstream ofs(fname);
+        //   ofs.write((char*)(cam_buffer.start), cam_buffer.length);
+        // }
       } else {
         // Todo support other pixel format
         // message.encoding = "rgb8";

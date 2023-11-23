@@ -65,12 +65,6 @@ class HobotUSBCamNode : public rclcpp::Node {
   rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr info_pub_ =
       nullptr;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_pub_ = nullptr;
-  rclcpp::PublisherHbmem<hbm_img_msgs::msg::HbmMsg1080P>::SharedPtr
-      hbmem_image_pub_1080_;
-  rclcpp::PublisherHbmem<hbm_img_msgs::msg::HbmMsg540P>::SharedPtr
-      hbmem_image_pub_540_;
-  rclcpp::PublisherHbmem<hbm_img_msgs::msg::HbmMsg480P>::SharedPtr
-      hbmem_image_pub_480_;
 };
 }  // namespace hobot_usb_cam
 
