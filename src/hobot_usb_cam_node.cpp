@@ -257,17 +257,23 @@ void HobotUSBCamNode::ReadFrame() {
         message.data.resize(size);
         memcpy(&message.data[0], cam_buffer.start, cam_buffer.length);
 
-        // static int32_t last_dump_sec = -1;
-        // if (last_dump_sec < 0 || (message.header.stamp.sec - last_dump_sec >= 5)) {
-        //   last_dump_sec = message.header.stamp.sec;
-        //   std::string fname = message.header.frame_id + "_" +
-        //     std::to_string(message.width) + "_" +
-        //     std::to_string(message.height) + "_" +
-        //     std::to_string(message.header.stamp.sec) + "_" +
-        //     std::to_string(message.header.stamp.nanosec) + ".jpeg";
-        //   std::ofstream ofs(fname);
-        //   ofs.write((char*)(cam_buffer.start), cam_buffer.length);
-        // }
+        
+        // export dump_usb_img=1
+        char* dump_usb_img = getenv("dump_usb_img");
+        if (dump_usb_img && std::string(dump_usb_img) == "1") {
+          RCLCPP_WARN(rclcpp::get_logger("usb_cam"), "dump_usb_img [%s] is enable", dump_usb_img);
+          static int32_t last_dump_sec = -1;
+          if (last_dump_sec < 0 || (message.header.stamp.sec - last_dump_sec >= 5)) {
+            last_dump_sec = message.header.stamp.sec;
+            std::string fname = message.header.frame_id + "_" +
+              std::to_string(message.width) + "_" +
+              std::to_string(message.height) + "_" +
+              std::to_string(message.header.stamp.sec) + "_" +
+              std::to_string(message.header.stamp.nanosec) + ".jpeg";
+            std::ofstream ofs(fname);
+            ofs.write((char*)(cam_buffer.start), cam_buffer.length);
+          }
+        }
       } else {
         // Todo support other pixel format
         // message.encoding = "rgb8";
