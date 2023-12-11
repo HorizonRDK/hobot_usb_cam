@@ -52,7 +52,7 @@ def generate_launch_description():
                     {"image_height": 480},
                     {"image_width": 640},
                     {"zero_copy": False},
-                    {"video_device": "/dev/video8"}
+                    {"video_device": "/dev/video0"}
                     ],
         arguments=['--ros-args', '--log-level', 'error']
     )
