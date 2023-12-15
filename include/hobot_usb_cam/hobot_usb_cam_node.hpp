@@ -1,77 +1,110 @@
-// Copyright (c) 2022，Horizon Robotics.
+// Copyright 2021 Evan Flynn
+// Copyright 2014 Robert Bosch, LLC
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+//    * Redistributions of source code must retain the above copyright
+//      notice, this list of conditions and the following disclaimer.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+//    * Redistributions in binary form must reproduce the above copyright
+//      notice, this list of conditions and the following disclaimer in the
+//      documentation and/or other materials provided with the distribution.
+//
+//    * Neither the name of the Evan Flynn nor the names of its
+//      contributors may be used to endorse or promote products derived from
+//      this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+// POSSIBILITY OF SUCH DAMAGE.
 
-#ifndef HOBOT_USB_CAM_NODE_HPP_
-#define HOBOT_USB_CAM_NODE_HPP_
 
-#include <rclcpp/rclcpp.hpp>
+#ifndef USB_CAM__USB_CAM_NODE_HPP_
+#define USB_CAM__USB_CAM_NODE_HPP_
+
+#include <memory>
 #include <string>
-#include <thread>
 #include <vector>
 
-#include "hbm_img_msgs/msg/hbm_msg1080_p.hpp"
-#include "hbm_img_msgs/msg/hbm_msg480_p.hpp"
-#include "hbm_img_msgs/msg/hbm_msg540_p.hpp"
-#include "hobot_usb_cam.hpp"
+//#include "camera_info_manager/camera_info_manager.hpp"
+//#include "image_transport/image_transport.hpp"
+#include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/image.hpp"
+#include "sensor_msgs/msg/compressed_image.hpp"
+#include "std_srvs/srv/set_bool.hpp"
 
-namespace hobot_usb_cam {
-class HobotUSBCamNode : public rclcpp::Node {
- public:
-  explicit HobotUSBCamNode(const rclcpp::NodeOptions &ndoe_options);
-  ~HobotUSBCamNode();
+#include "hobot_usb_cam/hobot_usb_cam.hpp"
+#include "sensor_msgs/msg/camera_info.hpp"
+#ifdef USING_HBMEM
+#include "hb_mem_mgr.h"
+#include "hbm_img_msgs/msg/hbm_msg1080_p.hpp"
+#endif
 
- private:
-  typedef enum {
-    kSTATE_INITIALLED,
-    kSTATE_RUNING,
-    kSTATE_STOP,
-    kSTATE_UNINITIALLED
-  } CamNodeState;
-  bool GetParams(void);
-  bool AssignParams(const std::vector<rclcpp::Parameter> &parameters);
-  bool SetPixelFormat(const std::string &pixel_format_name);
-  bool SetIOMethod(const std::string &io_method_name);
-  bool SetPublisher(void);
-  void ReadFrame(void);
-  HobotUSBCam cam_;
-  std::string video_device_name_;
-  std::string frame_id_;
-  std::string camera_calibration_file_path_;
-  HobotUSBCam::IOMethod io_method_name_;
-  HobotUSBCam::PixelFormat pixel_format_name_;
-  int image_width_;
-  int image_height_;
-  int framerate_;
-  bool zero_copy_enabled_;
-  bool read_cam_calibration_enabled_ = true;
-  bool reading_;
-  std::thread *read_thread_;
-  CamNodeState cam_node_state_;
+#if ngy
+std::ostream & operator<<(std::ostream & ostr, const rclcpp::Time & tm)
+{
+  ostr << tm.nanoseconds();
+  return ostr;
+}
+#endif
 
-  sensor_msgs::msg::CameraInfo camera_calibration_info_;
+namespace usb_cam
+{
 
-  rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr info_pub_ =
-      nullptr;
-  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_pub_ = nullptr;
-  rclcpp::PublisherHbmem<hbm_img_msgs::msg::HbmMsg1080P>::SharedPtr
-      hbmem_image_pub_1080_;
-  rclcpp::PublisherHbmem<hbm_img_msgs::msg::HbmMsg540P>::SharedPtr
-      hbmem_image_pub_540_;
-  rclcpp::PublisherHbmem<hbm_img_msgs::msg::HbmMsg480P>::SharedPtr
-      hbmem_image_pub_480_;
+class HobotUsbCamNode : public rclcpp::Node
+{
+public:
+  explicit HobotUsbCamNode(const rclcpp::NodeOptions & node_options);
+  ~HobotUsbCamNode();
+
+  void init();
+  void get_params();
+  void assign_params(const std::vector<rclcpp::Parameter> & parameters);
+  void set_v4l2_params();
+  void update();
+  bool take_and_send_image();
+  bool take_and_send_image_mjpeg();
+  bool hbmem_take_and_send_image();
+
+  rcl_interfaces::msg::SetParametersResult parameters_callback(
+    const std::vector<rclcpp::Parameter> & parameters);
+
+  void service_capture(
+    const std::shared_ptr<rmw_request_id_t> request_header,
+    const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
+    std::shared_ptr<std_srvs::srv::SetBool::Response> response);
+
+  UsbCam * m_camera;
+
+  sensor_msgs::msg::Image::UniquePtr m_image_msg;
+  sensor_msgs::msg::CompressedImage::UniquePtr m_compressed_img_msg;
+  //std::shared_ptr<image_transport::CameraPublisher> m_image_publisher;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_image_publisher;
+  rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_compressed_image_publisher;
+  rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr m_cam_info_publisher;
+
+  parameters_t m_parameters;
+
+  sensor_msgs::msg::CameraInfo::UniquePtr m_camera_info_msg;
+
+  rclcpp::TimerBase::SharedPtr m_timer;
+
+  rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr m_service_capture;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr m_parameters_callback_handle;
+
+#ifdef USING_HBMEM
+  int32_t mSendIdx = 0;
+  rclcpp::PublisherHbmem<hbm_img_msgs::msg::HbmMsg1080P>::SharedPtr hbmem_image_pub_1080_;
+#endif
 };
-}  // namespace hobot_usb_cam
-
-#endif  // HOBOT_USB_CAM_NODE_HPP_
+}  // namespace usb_cam
+#endif  // USB_CAM__USB_CAM_NODE_HPP_

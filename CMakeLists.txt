@@ -26,10 +26,36 @@ if(NOT CMAKE_CXX_STANDARD)
 endif()
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  add_compile_options(-Wall -Wextra -Wpedantic)
+  add_compile_options(-Wall -Wextra -Wpedantic -Wl,--no-as-needed)
+endif()
+
+if(BUILD_HBMEM)
+add_definitions(-DUSING_HBMEM)
+find_package(hbm_img_msgs REQUIRED)
+endif()
+
+find_package(OpenCV REQUIRED)
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(avcodec REQUIRED libavcodec)
+pkg_check_modules(avutil REQUIRED libavutil)
+pkg_check_modules(swscale REQUIRED libswscale)
+
+if(EXISTS ${avcodec})
+  message(STATUS "Found libavcodec: ${avcodec}")
+endif()
+
+if(EXISTS ${avutil})
+  message(STATUS "Found libavutil: ${avutil}")
+endif()
+
+if(EXISTS ${swscale})
+  message(STATUS "Found libswscale: ${swscale}")
 endif()
 
 # find dependencies
+find_package(ament_cmake_auto REQUIRED)
+ament_auto_find_build_dependencies()
 find_package(ament_cmake REQUIRED)
 # uncomment the following section in order to fill in
 # further dependencies manually.
@@ -38,16 +64,31 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(hbm_img_msgs REQUIRED)
 find_package(yaml_cpp_vendor REQUIRED)
+#find_package(std_srvs REQUIRED)
+
 # find_package(v4l-utils)
 
-include_directories(include/hobot_usb_cam)
+include_directories(include)
 
+find_package(ament_lint_auto REQUIRED)
+ament_lint_auto_find_test_dependencies()
 
 add_executable(${PROJECT_NAME}
   src/hobot_usb_cam_exec.cpp
   src/hobot_usb_cam_node.cpp
   src/hobot_usb_cam.cpp)
-ament_target_dependencies(${PROJECT_NAME} rclcpp sensor_msgs hbm_img_msgs yaml_cpp_vendor)
+
+target_include_directories(${PROJECT_NAME} PUBLIC
+  "include"
+  ${OpenCV_INCLUDE_DIRS}
+)
+
+target_link_libraries(${PROJECT_NAME}
+  ${avcodec_LIBRARIES}
+  ${avutil_LIBRARIES}
+  ${swscale_LIBRARIES}
+  ${OpenCV_LIBRARIES})
+ament_target_dependencies(${PROJECT_NAME} rclcpp sensor_msgs hbm_img_msgs  yaml_cpp_vendor std_srvs)
 # target_include_directories((${PROJECT_NAME} PUBLIC
 #   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 #   $<INSTALL_INTERFACE:include>))
@@ -66,6 +107,11 @@ install(TARGETS ${PROJECT_NAME}
 install(DIRECTORY
   launch
   DESTINATION share/${PROJECT_NAME}/
+)
+
+install(DIRECTORY
+  config
+  DESTINATION lib/${PROJECT_NAME}/
 )
 
 if(BUILD_TESTING)

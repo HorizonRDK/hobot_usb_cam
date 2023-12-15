@@ -1,397 +1,508 @@
-// Copyright (c) 2022，Horizon Robotics.
+// Copyright 2014 Robert Bosch, LLC
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+//    * Redistributions of source code must retain the above copyright
+//      notice, this list of conditions and the following disclaimer.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+//    * Redistributions in binary form must reproduce the above copyright
+//      notice, this list of conditions and the following disclaimer in the
+//      documentation and/or other materials provided with the distribution.
+//
+//    * Neither the name of the Robert Bosch, LLC nor the names of its
+//      contributors may be used to endorse or promote products derived from
+//      this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+// POSSIBILITY OF SUCH DAMAGE.
 
-#include "hobot_usb_cam_node.hpp"
-
-#include <fstream>
 #include <memory>
-#include <rclcpp/rclcpp.hpp>
+#include <sstream>
 #include <string>
-#include <thread>
-#include <utility>
 #include <vector>
 
-#include "hobot_usb_cam.hpp"
+#include "hobot_usb_cam/hobot_usb_cam_node.hpp"
+#include "hobot_usb_cam/utils.hpp"
 
-namespace hobot_usb_cam {
-HobotUSBCamNode::HobotUSBCamNode(const rclcpp::NodeOptions &ndoe_options)
-    : Node("hobot_usb_cam", ndoe_options),
-      reading_(false),
-      read_thread_(nullptr),
-      cam_node_state_(kSTATE_UNINITIALLED) {
+const char BASE_TOPIC_NAME[] = "image_raw";
+
+namespace usb_cam
+{
+
+HobotUsbCamNode::HobotUsbCamNode(const rclcpp::NodeOptions & node_options)
+: Node("usb_cam", node_options),
+  m_camera(new usb_cam::UsbCam()),
+  m_image_msg(new sensor_msgs::msg::Image()),
+  m_compressed_img_msg(nullptr),
+  m_compressed_image_publisher(nullptr),
+  m_cam_info_publisher(nullptr),
+  m_parameters(),
+  m_camera_info_msg(new sensor_msgs::msg::CameraInfo()),
+  m_service_capture(
+    this->create_service<std_srvs::srv::SetBool>(
+      "set_capture",
+      std::bind(
+        &HobotUsbCamNode::service_capture,
+        this,
+        std::placeholders::_1,
+        std::placeholders::_2,
+        std::placeholders::_3)))
+{
+  //m_image_publisher = this->create_publisher<sensor_msgs::msg::Image>("image_raw", 10);
+  m_image_publisher = this->create_publisher<sensor_msgs::msg::Image>("image", 10);
+  // declare params
+  this->declare_parameter("camera_name", "default_cam");
+  this->declare_parameter("camera_info_url", "");
   this->declare_parameter("framerate", 30);
-  this->declare_parameter("frame_id", "default_usb_cam");
+  this->declare_parameter("frame_id", "default_cam");
   this->declare_parameter("image_height", 480);
   this->declare_parameter("image_width", 640);
   this->declare_parameter("io_method", "mmap");
-  this->declare_parameter("pixel_format", "mjpeg");
-  this->declare_parameter("video_device", "/dev/video0");
-  this->declare_parameter("zero_copy", true);
+  this->declare_parameter("pixel_format", "yuyv");
+  this->declare_parameter("av_device_format", "YUV422P");
+  this->declare_parameter("video_device", "/dev/video8");
+  this->declare_parameter("brightness", 50);  // 0-255, -1 "leave alone"
+  this->declare_parameter("contrast", -1);    // 0-255, -1 "leave alone"
+  this->declare_parameter("saturation", -1);  // 0-255, -1 "leave alone"
+  this->declare_parameter("sharpness", -1);   // 0-255, -1 "leave alone"
+  this->declare_parameter("gain", -1);        // 0-100?, -1 "leave alone"
+  this->declare_parameter("auto_white_balance", true);
+  this->declare_parameter("white_balance", 4000);
+  this->declare_parameter("autoexposure", true);
+  this->declare_parameter("exposure", 100);
+  this->declare_parameter("autofocus", false);
+  this->declare_parameter("focus", -1);  // 0-255, -1 "leave alone"
+  this->declare_parameter("zero_copy", false);
   this->declare_parameter("camera_calibration_file_path", "");
+  
+  get_params();
+  init();
+  m_parameters_callback_handle = add_on_set_parameters_callback(
+    std::bind(
+      &HobotUsbCamNode::parameters_callback, this,
+      std::placeholders::_1));
+}
 
-  if (GetParams() == false) {
-    RCLCPP_ERROR(this->get_logger(), "Hobot USB Cam GetParams() failed\n\n");
-    return;
+HobotUsbCamNode::~HobotUsbCamNode()
+{
+  RCLCPP_WARN(this->get_logger(), "Shutting down");
+  m_image_msg.reset();
+  m_compressed_img_msg.reset();
+  m_camera_info_msg.reset();
+  m_timer.reset();
+  m_service_capture.reset();
+  m_parameters_callback_handle.reset();
+
+  delete (m_camera);
+}
+
+void HobotUsbCamNode::service_capture(
+  const std::shared_ptr<rmw_request_id_t> request_header,
+  const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
+  std::shared_ptr<std_srvs::srv::SetBool::Response> response)
+{
+  (void) request_header;
+  if (request->data) {
+    m_camera->start_capturing();
+    response->message = "Start Capturing";
+  } else {
+    m_camera->stop_capturing();
+    response->message = "Stop Capturing";
   }
-  if (!cam_.ReadCalibrationFile(camera_calibration_info_,
-                                camera_calibration_file_path_)) {
-    read_cam_calibration_enabled_ = false;
-    RCLCPP_WARN(rclcpp::get_logger("hobot_usb_cam"),
-                "get camera calibration parameters failed");
+}
+
+void HobotUsbCamNode::init()
+{
+  while (m_parameters.frame_id == "") {
+    RCLCPP_WARN_ONCE(
+      this->get_logger(), "Required Parameters not set...waiting until they are set");
+    get_params();
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
   }
 
-  HobotUSBCam::CamInformation cam_information;
-  cam_information.dev = video_device_name_;
-  cam_information.framerate = framerate_;
-  cam_information.image_height = image_height_;
-  cam_information.image_width = image_width_;
-  cam_information.io = io_method_name_;
-  cam_information.pixel_format = pixel_format_name_;
-  if (cam_.Init(cam_information) == false) {
-    RCLCPP_ERROR(this->get_logger(), "Hobot USB Cam Init failed\n\n");
+  // Check if given device name is an available v4l2 device
+  auto available_devices = usb_cam::utils::available_devices();
+  if (available_devices.find(m_parameters.device_name) == available_devices.end()) {
+    RCLCPP_ERROR_STREAM(
+      this->get_logger(),
+      "Device specified is not available or is not a vaild V4L2 device: `" <<
+        m_parameters.device_name << "`"
+    );
+    RCLCPP_INFO(this->get_logger(), "Available V4L2 devices are:");
+    for (const auto & device : available_devices) {
+      RCLCPP_INFO_STREAM(this->get_logger(), "    " << device.first);
+      RCLCPP_INFO_STREAM(this->get_logger(), "        " << device.second.card);
+    }
     rclcpp::shutdown();
     return;
   }
-  cam_node_state_ = kSTATE_INITIALLED;
-  // Update camera params.
-  framerate_ = cam_information.framerate;
-  image_height_ = cam_information.image_height;
-  image_width_ = cam_information.image_width;
-  pixel_format_name_ = cam_information.pixel_format;
 
-  // This should be done after get_params()
-  if (SetPublisher() == false) {
+  // if pixel format is equal to 'mjpeg', i.e. raw mjpeg stream, initialize compressed image message
+  // and publisher
+  if (m_parameters.pixel_format_name == "mjpeg-compressed") {
+    m_compressed_img_msg.reset(new sensor_msgs::msg::CompressedImage());
+    m_compressed_img_msg->header.frame_id = m_parameters.frame_id;
+    m_compressed_image_publisher =
+      this->create_publisher<sensor_msgs::msg::CompressedImage>(
+      std::string(BASE_TOPIC_NAME) + "/compressed", rclcpp::QoS(100));
+  }
+  m_cam_info_publisher =
+      this->create_publisher<sensor_msgs::msg::CameraInfo>(
+      "camera_info", rclcpp::QoS(100));
+  m_image_msg->header.frame_id = m_parameters.frame_id;
+  RCLCPP_INFO(
+    this->get_logger(), "Starting '%s' (%s) at %dx%d via %s (%s) at %i FPS",
+    m_parameters.camera_name.c_str(), m_parameters.device_name.c_str(),
+    m_parameters.image_width, m_parameters.image_height, m_parameters.io_method_name.c_str(),
+    m_parameters.pixel_format_name.c_str(), m_parameters.framerate);
+  // set the IO method
+  io_method_t io_method =
+    usb_cam::utils::io_method_from_string(m_parameters.io_method_name);
+  if (io_method == usb_cam::utils::IO_METHOD_UNKNOWN) {
+    RCLCPP_ERROR_ONCE(
+      this->get_logger(),
+      "Unknown IO method '%s'", m_parameters.io_method_name.c_str());
+    rclcpp::shutdown();
     return;
   }
-  if (cam_.Start() == false) {
-    RCLCPP_ERROR(this->get_logger(), "Hobot USB Cam Start failed\n\n");
-    return;
+  // load the camera info
+  if (m_camera->ReadCalibrationFile(*m_camera_info_msg,
+                                m_parameters.camera_calibration_file_path)) {
+    m_camera_info_msg->header.frame_id = m_parameters.frame_id;
+    m_camera_info_msg->width = m_parameters.image_width;
+    m_camera_info_msg->height = m_parameters.image_height;
+  } else {
+    m_camera_info_msg = nullptr;
   }
-  cam_node_state_ = kSTATE_RUNING;
-  reading_ = true;
-  read_thread_ = new std::thread(&HobotUSBCamNode::ReadFrame, this);
+
+  // configure the camera
+  m_camera->configure(m_parameters, io_method);
+
+  RCLCPP_INFO(this->get_logger(), "This devices supproted formats:");
+  for (auto fmt : m_camera->supported_formats()) {
+    RCLCPP_INFO(
+      this->get_logger(),
+      "\t%s: %d x %d (%d Hz)",
+      fmt.format.description,
+      fmt.v4l2_fmt.width,
+      fmt.v4l2_fmt.height,
+      fmt.v4l2_fmt.discrete.denominator / fmt.v4l2_fmt.discrete.numerator);
+  }
+
+  set_v4l2_params();
+
+  // start the camera
+  m_camera->start();
+
+#ifdef USING_HBMEM
+  // 创建hbmempub
+  hbmem_image_pub_1080_ =
+        this->create_publisher_hbmem<hbm_img_msgs::msg::HbmMsg1080P>(
+            "hbmem_img", 5);
+#endif
+  // TODO(lucasw) should this check a little faster than expected frame rate?
+  // TODO(lucasw) how to do small than ms, or fractional ms- std::chrono::nanoseconds?
+  const int period_ms = 1000 / m_parameters.framerate;
+  m_timer = this->create_wall_timer(
+    std::chrono::milliseconds(static_cast<int64_t>(period_ms)),
+    std::bind(&HobotUsbCamNode::update, this));
+  RCLCPP_INFO_STREAM(this->get_logger(), "Timer triggering every " << period_ms << " ms");
 }
 
-HobotUSBCamNode::~HobotUSBCamNode() {
-  reading_ = false;
-  if (read_thread_ != nullptr) read_thread_->join();
-  if (cam_node_state_ == kSTATE_RUNING) {
-    if (cam_.Stop() == false) {
-      RCLCPP_ERROR(this->get_logger(), "Hobot USB Cam Stop failed\n\n");
-    }
-    cam_node_state_ = kSTATE_STOP;
-  }
-  if (cam_node_state_ == kSTATE_STOP) {
-    if (cam_.DeInit() == false) {
-      RCLCPP_ERROR(this->get_logger(), "Hobot USB Cam Dinit failed\n\n");
-    }
-  }
-}
-
-bool HobotUSBCamNode::GetParams() {
+void HobotUsbCamNode::get_params()
+{
   auto parameters_client = std::make_shared<rclcpp::SyncParametersClient>(this);
-  auto parameters =
-      parameters_client->get_parameters({"frame_id",
-                                         "framerate",
-                                         "image_height",
-                                         "image_width",
-                                         "io_method",
-                                         "pixel_format",
-                                         "video_device",
-                                         "zero_copy",
-                                         "camera_calibration_file_path"});
-  return AssignParams(parameters);
+  auto parameters = parameters_client->get_parameters(
+    {
+      "camera_name", "camera_info_url", "frame_id", "framerate", "image_height", "image_width",
+      "io_method", "pixel_format", "av_device_format", "video_device", "brightness", "contrast",
+      "saturation", "sharpness", "gain", "auto_white_balance", "white_balance", "autoexposure",
+      "exposure", "autofocus", "focus", "zero_copy", "camera_calibration_file_path"
+    }
+  );
+
+  assign_params(parameters);
 }
 
-bool HobotUSBCamNode::AssignParams(
-    const std::vector<rclcpp::Parameter> &parameters) {
-  for (auto &parameter : parameters) {
-    if (parameter.get_name() == "frame_id") {
-      frame_id_ = parameter.value_to_string();
+void HobotUsbCamNode::assign_params(const std::vector<rclcpp::Parameter> & parameters)
+{
+  for (auto & parameter : parameters) {
+    if (parameter.get_name() == "camera_name") {
+      RCLCPP_INFO(this->get_logger(), "camera_name value: %s", parameter.value_to_string().c_str());
+      m_parameters.camera_name = parameter.value_to_string();
+    } else if (parameter.get_name() == "camera_info_url") {
+      m_parameters.camera_info_url = parameter.value_to_string();
+    } else if (parameter.get_name() == "frame_id") {
+      m_parameters.frame_id = parameter.value_to_string();
     } else if (parameter.get_name() == "framerate") {
-      framerate_ = parameter.as_int();
+      RCLCPP_WARN(this->get_logger(), "framerate: %d", parameter.as_int());
+      m_parameters.framerate = parameter.as_int();
     } else if (parameter.get_name() == "image_height") {
-      image_height_ = parameter.as_int();
+      m_parameters.image_height = parameter.as_int();
     } else if (parameter.get_name() == "image_width") {
-      image_width_ = parameter.as_int();
+      m_parameters.image_width = parameter.as_int();
     } else if (parameter.get_name() == "io_method") {
-      std::string io_method_name = parameter.value_to_string();
-      if (SetIOMethod(io_method_name) == false) return false;
+      m_parameters.io_method_name = parameter.value_to_string();
     } else if (parameter.get_name() == "pixel_format") {
-      std::string pixel_format_name = parameter.value_to_string();
-      if (SetPixelFormat(pixel_format_name) ==
-          false) {  //目前SetPixelFormat只会返回true
-        return false;
-      }
+      m_parameters.pixel_format_name = parameter.value_to_string();
+      RCLCPP_WARN(this->get_logger(), "pixel_format_name: %s", m_parameters.pixel_format_name.c_str());
+    } else if (parameter.get_name() == "av_device_format") {
+      m_parameters.av_device_format = parameter.value_to_string();
     } else if (parameter.get_name() == "video_device") {
-      video_device_name_ = parameter.value_to_string();
+      m_parameters.device_name = parameter.value_to_string();
+    } else if (parameter.get_name() == "brightness") {
+      m_parameters.brightness = parameter.as_int();
+    } else if (parameter.get_name() == "contrast") {
+      m_parameters.contrast = parameter.as_int();
+    } else if (parameter.get_name() == "saturation") {
+      m_parameters.saturation = parameter.as_int();
+    } else if (parameter.get_name() == "sharpness") {
+      m_parameters.sharpness = parameter.as_int();
+    } else if (parameter.get_name() == "gain") {
+      m_parameters.gain = parameter.as_int();
+    } else if (parameter.get_name() == "auto_white_balance") {
+      m_parameters.auto_white_balance = parameter.as_bool();
+    } else if (parameter.get_name() == "white_balance") {
+      m_parameters.white_balance = parameter.as_int();
+    } else if (parameter.get_name() == "autoexposure") {
+      m_parameters.autoexposure = parameter.as_bool();
+    } else if (parameter.get_name() == "exposure") {
+      m_parameters.exposure = parameter.as_int();
+    } else if (parameter.get_name() == "autofocus") {
+      m_parameters.autofocus = parameter.as_bool();
+    } else if (parameter.get_name() == "focus") {
+      m_parameters.focus = parameter.as_int();
     } else if (parameter.get_name() == "zero_copy") {
-      zero_copy_enabled_ = parameter.as_bool();
+      m_parameters.zero_copy = parameter.as_bool();
     } else if (parameter.get_name() == "camera_calibration_file_path") {
-      camera_calibration_file_path_ = parameter.value_to_string();
+      m_parameters.camera_calibration_file_path = parameter.value_to_string();
     } else {
-      RCLCPP_WARN(this->get_logger(),
-                  "Invalid parameter name: %s",
-                  parameter.get_name().c_str());
+      RCLCPP_WARN(this->get_logger(), "Invalid parameter name: %s", parameter.get_name().c_str());
     }
   }
-  return true;
 }
 
-bool HobotUSBCamNode::SetPixelFormat(const std::string &pixel_format_name) {
-  if (pixel_format_name == "mjpeg") {
+/// @brief Send current parameters to V4L2 device
+/// TODO(flynneva): should this actuaully be part of UsbCam class?
+void HobotUsbCamNode::set_v4l2_params()
+{
+  // set camera parameters
+  if (m_parameters.brightness >= 0) {
+    RCLCPP_INFO(this->get_logger(), "Setting 'brightness' to %d", m_parameters.brightness);
+    m_camera->set_v4l_parameter("brightness", m_parameters.brightness);
+  }
+
+  if (m_parameters.contrast >= 0) {
+    RCLCPP_INFO(this->get_logger(), "Setting 'contrast' to %d", m_parameters.contrast);
+    m_camera->set_v4l_parameter("contrast", m_parameters.contrast);
+  }
+
+  if (m_parameters.saturation >= 0) {
+    RCLCPP_INFO(this->get_logger(), "Setting 'saturation' to %d", m_parameters.saturation);
+    m_camera->set_v4l_parameter("saturation", m_parameters.saturation);
+  }
+
+  if (m_parameters.sharpness >= 0) {
+    RCLCPP_INFO(this->get_logger(), "Setting 'sharpness' to %d", m_parameters.sharpness);
+    m_camera->set_v4l_parameter("sharpness", m_parameters.sharpness);
+  }
+
+  if (m_parameters.gain >= 0) {
+    RCLCPP_INFO(this->get_logger(), "Setting 'gain' to %d", m_parameters.gain);
+    m_camera->set_v4l_parameter("gain", m_parameters.gain);
+  }
+
+  // check auto white balance
+  if (m_parameters.auto_white_balance) {
+    m_camera->set_v4l_parameter("white_balance_temperature_auto", 1);
+    RCLCPP_INFO(this->get_logger(), "Setting 'white_balance_temperature_auto' to %d", 1);
   } else {
-    RCLCPP_WARN(this->get_logger(),
-                "Invalid pixel format: %s! Currently only support "
-                "mjpeg pixel format. Set pixel format to mjepg",
-                pixel_format_name.c_str());
+    RCLCPP_INFO(this->get_logger(), "Setting 'white_balance' to %d", m_parameters.white_balance);
+    m_camera->set_v4l_parameter("white_balance_temperature_auto", 0);
+    m_camera->set_v4l_parameter("white_balance_temperature", m_parameters.white_balance);
   }
-  pixel_format_name_ = HobotUSBCam::kPIXEL_FORMAT_MJPEG;
-  // Todo : support yuyv uyvy yuvmono10 rgb24 grey
-  // if (pixel_format_name == "yuyv") {
-  //   pixel_format_name_ = HobotUSBCam::kPIXEL_FORMAT_YUYV;
-  // } else if (pixel_format_name == "uyvy") {
-  //   pixel_format_name_ = HobotUSBCam::kPIXEL_FORMAT_UYVY;
-  // } else if (pixel_format_name == "mjpeg") {
-  //   pixel_format_name_ = HobotUSBCam::kPIXEL_FORMAT_MJPEG;
-  // } else if (pixel_format_name == "yuvmono10") {
-  //   pixel_format_name_ = HobotUSBCam::kPIXEL_FORMAT_YUVMONO10;
-  // } else if (pixel_format_name == "rgb24") {
-  //   pixel_format_name_ = HobotUSBCam::kPIXEL_FORMAT_RGB24;
-  // } else if (pixel_format_name == "grey") {
-  //   pixel_format_name_ = HobotUSBCam::kPIXEL_FORMAT_GREY;
-  // } else {
-  //   RCLCPP_ERROR(this->get_logger(), "Invalid parameter name: %s",
-  //   pixel_format_name.c_str());
-  //   return false;
-  // }
-  return true;
-}
 
-bool HobotUSBCamNode::SetIOMethod(const std::string &io_method_name) {
-  if (io_method_name == "mmap") {
-    io_method_name_ = HobotUSBCam::kIO_METHOD_MMAP;
-  } else if (io_method_name == "read") {
-    io_method_name_ = HobotUSBCam::kIO_METHOD_READ;
-  } else if (io_method_name == "userptr") {
-    io_method_name_ = HobotUSBCam::kIO_METHOD_USERPTR;
+  // check auto exposure
+  if (!m_parameters.autoexposure) {
+    RCLCPP_INFO(this->get_logger(), "Setting 'exposure_auto' to %d", 1);
+    RCLCPP_INFO(this->get_logger(), "Setting 'exposure' to %d", m_parameters.exposure);
+    // turn down exposure control (from max of 3)
+    m_camera->set_v4l_parameter("exposure_auto", 1);
+    // change the exposure level
+    m_camera->set_v4l_parameter("exposure_absolute", m_parameters.exposure);
   } else {
-    RCLCPP_ERROR(this->get_logger(),
-                 "Invalid io_method name: %s! "
-                 "mmap、read and userptr are supported! Please check the "
-                 "io_method parameter!",
-                 io_method_name.c_str());
-    return false;
+    RCLCPP_INFO(this->get_logger(), "Setting 'exposure_auto' to %d", 3);
+    m_camera->set_v4l_parameter("exposure_auto", 3);
+  }
+
+  // check auto focus
+  if (m_parameters.autofocus) {
+    m_camera->set_auto_focus(1);
+    RCLCPP_INFO(this->get_logger(), "Setting 'focus_auto' to %d", 1);
+    m_camera->set_v4l_parameter("focus_auto", 1);
+  } else {
+    RCLCPP_INFO(this->get_logger(), "Setting 'focus_auto' to %d", 0);
+    m_camera->set_v4l_parameter("focus_auto", 0);
+    if (m_parameters.focus >= 0) {
+      RCLCPP_INFO(this->get_logger(), "Setting 'focus_absolute' to %d", m_parameters.focus);
+      m_camera->set_v4l_parameter("focus_absolute", m_parameters.focus);
+    }
+  }
+}
+
+bool HobotUsbCamNode::take_and_send_image()
+{
+  // Only resize if required
+  if (sizeof(m_image_msg->data) != m_camera->get_image_size_in_bytes()) {
+    m_image_msg->width = m_camera->get_image_width();
+    m_image_msg->height = m_camera->get_image_height();
+    m_image_msg->encoding = m_camera->get_pixel_format()->ros();
+    m_image_msg->step = m_camera->get_image_step();
+    if (m_image_msg->step == 0) {
+      // Some formats don't have a linesize specified by v4l2
+      // Fall back to manually calculating it step = size / height
+      m_image_msg->step = m_camera->get_image_size_in_bytes() / m_image_msg->height;
+    }
+    m_image_msg->data.resize(m_camera->get_image_size_in_bytes());
+  }
+  // grab the image, pass image msg buffer to fill
+  m_camera->get_image(reinterpret_cast<char *>(&m_image_msg->data[0]));
+
+  auto stamp = m_camera->get_image_timestamp();
+  m_image_msg->header.stamp.sec = stamp.tv_sec;
+  m_image_msg->header.stamp.nanosec = stamp.tv_nsec;
+
+  RCLCPP_INFO(this->get_logger(), "push image data");
+  m_image_publisher->publish(*m_image_msg);
+  if (m_camera_info_msg != nullptr) {
+    m_camera_info_msg->header = m_image_msg->header;
+    m_cam_info_publisher->publish(*m_camera_info_msg);
   }
   return true;
 }
 
-bool HobotUSBCamNode::SetPublisher() {
-  if (zero_copy_enabled_) {
-    if (cam_.CheckResolutionFromFormats(image_width_, image_height_)) {
-      hbmem_image_pub_1080_ =
-          this->create_publisher_hbmem<hbm_img_msgs::msg::HbmMsg1080P>(
-              "hbmem_image", 5);
-      hbmem_image_pub_540_ = nullptr;
-      hbmem_image_pub_480_ = nullptr;
-      image_pub_ = nullptr;
-    } else {
-      RCLCPP_ERROR(this->get_logger(),
-                   "Invalid publish resolution width:%d height:%d. Please "
-                   "modify the parameters image_height or image_width",
-                   image_width_,
-                   image_height_);
-      return false;
+bool HobotUsbCamNode::hbmem_take_and_send_image() {
+  //static int mSendIdx = 0;
+#ifdef USING_HBMEM
+  auto loanedMsg = hbmem_image_pub_1080_->borrow_loaned_message();
+  if (loanedMsg.is_valid()) {
+    auto& msg = loanedMsg.get();
+    msg.width = m_camera->get_image_width();
+    msg.height = m_camera->get_image_height();
+    auto encoding = m_camera->get_pixel_format()->ros();
+    memcpy(&msg.encoding[0], encoding.c_str(), encoding.length());
+    msg.step = m_camera->get_image_step();
+    m_camera->get_image(reinterpret_cast<char *>(&msg.data[0]));
+    msg.data_size = m_camera->get_image_data_size();
+    auto stamp = m_camera->get_image_timestamp();
+    msg.time_stamp.sec = stamp.tv_sec;
+    msg.time_stamp.nanosec = stamp.tv_nsec;
+    msg.index = mSendIdx++;
+    RCLCPP_INFO(this->get_logger(), "push image data by hbmem");
+    hbmem_image_pub_1080_->publish(std::move(loanedMsg));
+    if (m_camera_info_msg != nullptr) {
+      m_camera_info_msg->header.stamp = msg.time_stamp;
+      m_camera_info_msg->header = m_image_msg->header;
+      m_cam_info_publisher->publish(*m_camera_info_msg);
     }
   } else {
-    image_pub_ = this->create_publisher<sensor_msgs::msg::Image>("image", 5);
+    RCLCPP_WARN(rclcpp::get_logger("mipi_node"),
+                "borrow_loaned_message failed");
   }
-  info_pub_ =
-      this->create_publisher<sensor_msgs::msg::CameraInfo>("camera_info", 5);
+#endif
   return true;
 }
 
-void HobotUSBCamNode::ReadFrame() {
-  while (reading_) {
-    HobotUSBCam::CamBuffer cam_buffer;
-    cam_.GetFrame(cam_buffer);
-    switch (pixel_format_name_) {
-      case HobotUSBCam::kPIXEL_FORMAT_MJPEG:
-        /* code */
-        break;
-      case HobotUSBCam::kPIXEL_FORMAT_YUYV:
-        break;
-      case HobotUSBCam::kPIXEL_FORMAT_UYVY:
-        break;
-      case HobotUSBCam::kPIXEL_FORMAT_YUVMONO10:
-        break;
-      case HobotUSBCam::kPIXEL_FORMAT_RGB24:
-        break;
-      case HobotUSBCam::kPIXEL_FORMAT_GREY:
-        break;
-      default:
-        break;
+bool HobotUsbCamNode::take_and_send_image_mjpeg()
+{
+  if (m_parameters.pixel_format_name == "mjpeg-compressed") {
+    m_compressed_img_msg->format = "jpeg";
+    // grab the image, pass image msg buffer to fill
+    auto data_buf = m_camera->get_image();
+    m_compressed_img_msg->data.resize(m_camera->get_image_data_size());
+    memcpy(&m_compressed_img_msg->data[0], data_buf, m_camera->get_image_data_size());
+
+    auto stamp = m_camera->get_image_timestamp();
+    m_compressed_img_msg->header.stamp.sec = stamp.tv_sec;
+    m_compressed_img_msg->header.stamp.nanosec = stamp.tv_nsec;
+
+    m_compressed_image_publisher->publish(*m_compressed_img_msg);
+    m_compressed_img_msg->data.resize(m_camera->get_image_size_in_bytes());
+    if (m_camera_info_msg != nullptr) {
+      m_camera_info_msg->header = m_compressed_img_msg->header;
+      m_cam_info_publisher->publish(*m_camera_info_msg);
     }
-    if (zero_copy_enabled_) {
-      if (image_width_ == 1080) {
-        auto loanedMsg = hbmem_image_pub_1080_->borrow_loaned_message();
-        if (loanedMsg.is_valid()) {
-          auto &message = loanedMsg.get();
-          sensor_msgs::msg::CameraInfo camera_calibration_info;
-          message.height = 1080;
-          message.width = 1920;
-          message.step = 1920 * 3;
-          memcpy(message.encoding.data(), "jpeg", strlen("jpeg"));
-          message.time_stamp.sec = cam_buffer.reserved_buffer.timestamp.tv_sec;
-          message.time_stamp.nanosec =
-              cam_buffer.reserved_buffer.timestamp.tv_usec * 1000;
-          camera_calibration_info.header.stamp = message.time_stamp;
-          if (cam_buffer.length < message.step * message.height) {
-            memcpy(&message.data[0], cam_buffer.start, cam_buffer.length);
-            message.data_size = cam_buffer.length;
-          } else {
-            memcpy(&message.data[0],
-                   cam_buffer.start,
-                   message.step * message.height);
-            message.data_size = message.step * message.height;
-          }
-          hbmem_image_pub_1080_->publish(std::move(loanedMsg));
-          if (read_cam_calibration_enabled_ != false) {
-            camera_calibration_info = camera_calibration_info_;
-            camera_calibration_info.header.frame_id = frame_id_;
-            info_pub_->publish(camera_calibration_info);
-            RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
-                        "publish camera info.\n");
-          } else {
-            RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
-                        "Unable to publish camera info.\n");
-          }
-        }
-      } else if (image_width_ == 540) {
-        auto loanedMsg = hbmem_image_pub_1080_->borrow_loaned_message();
-        if (loanedMsg.is_valid()) {
-          auto &message = loanedMsg.get();
-          sensor_msgs::msg::CameraInfo camera_calibration_info;
-          message.height = 540;
-          message.width = 960;
-          message.step = 960 * 3;
-          memcpy(message.encoding.data(), "jpeg", strlen("jpeg"));
-          message.time_stamp.sec = cam_buffer.reserved_buffer.timestamp.tv_sec;
-          message.time_stamp.nanosec =
-              cam_buffer.reserved_buffer.timestamp.tv_usec * 1000;
-          camera_calibration_info.header.stamp = message.time_stamp;
-          if (cam_buffer.length < message.step * message.height) {
-            memcpy(&message.data[0], cam_buffer.start, cam_buffer.length);
-            message.data_size = cam_buffer.length;
-          } else {
-            memcpy(&message.data[0],
-                   cam_buffer.start,
-                   message.step * message.height);
-            message.data_size = message.step * message.height;
-          }
-          hbmem_image_pub_1080_->publish(std::move(loanedMsg));
-          if (read_cam_calibration_enabled_ != false) {
-            camera_calibration_info = camera_calibration_info_;
-            camera_calibration_info.header.frame_id = frame_id_;
-            info_pub_->publish(camera_calibration_info);
-            RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
-                        "publish camera info.");
-          } else {
-            RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
-                        "Unable to publish camera info.");
-          }
-        }
-      } else {
-        auto loanedMsg = hbmem_image_pub_1080_->borrow_loaned_message();
-        if (loanedMsg.is_valid()) {
-          auto &message = loanedMsg.get();
-          sensor_msgs::msg::CameraInfo camera_calibration_info;
-          message.height = 480;
-          message.width = 640;
-          message.step = 640 * 3;
-          memcpy(message.encoding.data(), "jpeg", strlen("jpeg"));
-          message.time_stamp.sec = cam_buffer.reserved_buffer.timestamp.tv_sec;
-          message.time_stamp.nanosec =
-              cam_buffer.reserved_buffer.timestamp.tv_usec * 1000;
-          camera_calibration_info.header.stamp = message.time_stamp;
-          if (cam_buffer.length < message.step * message.height) {
-            memcpy(&message.data[0], cam_buffer.start, cam_buffer.length);
-            message.data_size = cam_buffer.length;
-          } else {
-            memcpy(&message.data[0],
-                   cam_buffer.start,
-                   message.step * message.height);
-            message.data_size = message.step * message.height;
-          }
-          hbmem_image_pub_1080_->publish(std::move(loanedMsg));
-          if (read_cam_calibration_enabled_ != false) {
-            camera_calibration_info = camera_calibration_info_;
-            camera_calibration_info.header.frame_id = frame_id_;
-            info_pub_->publish(camera_calibration_info);
-            RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
-                        "publish camera info.");
-          } else {
-            RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
-                        "Unable to publish camera info.");
-          }
-        }
-      }
-    } else {
-      auto message = sensor_msgs::msg::Image();
-      sensor_msgs::msg::CameraInfo camera_calibration_info;
-      size_t size;
-      message.header.frame_id = frame_id_;
-      message.height = image_height_;
-      message.width = image_width_;
-      message.step = image_width_ * 3;
-      message.header.stamp.sec = cam_buffer.reserved_buffer.timestamp.tv_sec;
-      message.header.stamp.nanosec =
-          cam_buffer.reserved_buffer.timestamp.tv_usec * 1000;
-      camera_calibration_info.header.stamp = message.header.stamp;
-      if (pixel_format_name_ == HobotUSBCam::kPIXEL_FORMAT_MJPEG) {
-        message.encoding = "jpeg";
-        size = cam_buffer.length;
-        message.data.resize(size);
-        memcpy(&message.data[0], cam_buffer.start, cam_buffer.length);
-      } else {
-        // Todo support other pixel format
-        // message.encoding = "rgb8";
-        // size = message.step * message.height;
-        // message.data.resize(size);
-        // memcpy(&message.data[0], );
-      }
-      image_pub_->publish(message);
-      if (read_cam_calibration_enabled_ != false) {
-        camera_calibration_info = camera_calibration_info_;
-        camera_calibration_info.header.frame_id = frame_id_;
-        info_pub_->publish(camera_calibration_info);
-        RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
-                    "publish camera info.\n");
-      } else {
-        RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
-                    "Unable to publish camera info.");
-      }
+    RCLCPP_INFO(this->get_logger(), "take_and_send_image_mjpeg /mjpeg-compressed");
+  } else {
+    // grab the image, pass image msg buffer to fill
+    m_image_msg->width = m_camera->get_image_width();
+    m_image_msg->height = m_camera->get_image_height();
+    m_image_msg->encoding = "jpeg";
+    m_image_msg->step = m_camera->get_image_step();
+    if (m_image_msg->step == 0) {
+      // Some formats don't have a linesize specified by v4l2
+      // Fall back to manually calculating it step = size / height
+      m_image_msg->step = m_camera->get_image_size_in_bytes() / m_image_msg->height;
     }
-    RCLCPP_INFO(this->get_logger(),
-                "publish image %dx%d"
-                " encoding:%d size:%d\n",
-                image_width_,
-                image_height_,
-                pixel_format_name_,
-                cam_buffer.length);
-    cam_.ReleaseFrame(cam_buffer);
+    auto data_buf = m_camera->get_image();
+    m_image_msg->data.resize(m_camera->get_image_data_size());
+    memcpy(&m_image_msg->data[0], data_buf, m_camera->get_image_data_size());
+
+    auto stamp = m_camera->get_image_timestamp();
+    m_image_msg->header.stamp.sec = stamp.tv_sec;
+    m_image_msg->header.stamp.nanosec = stamp.tv_nsec;
+
+    m_image_publisher->publish(*m_image_msg);
+    if (m_camera_info_msg != nullptr) {
+      m_camera_info_msg->header = m_image_msg->header;
+      m_cam_info_publisher->publish(*m_camera_info_msg);
+    }
+    RCLCPP_INFO(this->get_logger(), "take_and_send_image_mjpeg /image");
   }
+  return true;
 }
 
-}  // namespace hobot_usb_cam
+rcl_interfaces::msg::SetParametersResult HobotUsbCamNode::parameters_callback(
+  const std::vector<rclcpp::Parameter> & parameters)
+{
+  RCLCPP_DEBUG(this->get_logger(), "Setting parameters for %s", m_parameters.camera_name.c_str());
+  m_timer->reset();
+  assign_params(parameters);
+  set_v4l2_params();
+  rcl_interfaces::msg::SetParametersResult result;
+  result.successful = true;
+  result.reason = "success";
+  return result;
+}
+
+void HobotUsbCamNode::update()
+{
+  if (m_camera->is_capturing()) {
+    // If the camera exposure longer higher than the framerate period
+    // then that caps the framerate.
+    // auto t0 = now();
+    bool isSuccessful = m_parameters.zero_copy ? hbmem_take_and_send_image() : 
+      (((m_parameters.pixel_format_name == "mjpeg") || 
+        (m_parameters.pixel_format_name == "mjpeg-compressed")) ?
+      take_and_send_image_mjpeg() : take_and_send_image());
+
+    if (!isSuccessful) {
+      RCLCPP_WARN_ONCE(this->get_logger(), "USB camera did not respond in time.");
+    }
+  }
+}
+}  // namespace usb_cam
+
+
+//#include "rclcpp_components/register_node_macro.hpp"
+//RCLCPP_COMPONENTS_REGISTER_NODE(usb_cam::HobotUsbCamNode)

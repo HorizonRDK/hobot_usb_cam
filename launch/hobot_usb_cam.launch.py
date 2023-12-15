@@ -38,7 +38,7 @@ def generate_launch_description():
             description='image height'),
         DeclareLaunchArgument(
             'usb_image_width',
-            default_value='640',
+            default_value='960',
             description='image width'),
         DeclareLaunchArgument(
             'usb_io_method',

@@ -87,7 +87,7 @@ ros2 launch websocket websocket.launch.py websocket_image_topic:=/image websocke
 | image_height| 图像高方向分辨率 | int    | 根据sensor支持选择         | 否       | 640                |
 | image_width | 图像宽方向分辨率 | int    | 根据sensor支持选择         | 否        | 480               |
 | io_method   | 从USB摄像头获取图像的io类型            | string | mmap/read/userptr          | 否       | "mmap"         |
-| pixel_format| 发布图像编码方式          | string | 当前只支持mjpeg            | 否        | “mjpeg”           |
+| pixel_format| 发布图像编码方式          | string | "mjpeg,mjpeg-compressed,mjpeg2rgb,rgb8,yuyv,yuyv2rgb,uyvy,uyvy2rgb,m4202rgb,mono8,mono16,y102mono8"        | 否        | “mjpeg”           |
 | video_device| 设备驱动名称     | string | 设备名称一般为/dev/videox  | 否        | "/dev/video0"     |
 | zero_copy   | 图像传输方式，配置shared_mem后将使用零拷贝机制传输   | bool   | True/False                 | 否       | "True"           |
 | camera_calibration_file_path  | 相机标定文件的存放路径  | string   | 根据实际的相机标定文件存放路径配置   | 否  | "/opt/tros/lib/hobot_usb_cam/config/usb_camera_calibration.yaml" |
