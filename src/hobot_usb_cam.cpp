@@ -516,10 +516,6 @@ void UsbCam::configure(
 {
   m_device_name = parameters.device_name;
   m_io = io_method;
-
-  // Open device file descriptor before anything else
-  open_device();
-
   m_image.width = static_cast<int>(parameters.image_width);
   m_image.height = static_cast<int>(parameters.image_height);
   m_image.set_number_of_pixels();
@@ -529,8 +525,50 @@ void UsbCam::configure(
   m_image.set_bytes_per_line();
   m_image.set_size_in_bytes();
   m_framerate = parameters.framerate;
+  bool init_success = true;
 
-  init_device();
+  if (!configure_exe()) {
+    // 遍历/dev/下的video设备
+    // 使用 find 命令查找/dev/下的video设备
+    std::string command = "find /dev -name \"video[0-9]*\" | sort";
+    FILE* fp = popen(command.c_str(), "r");
+    if (fp) {
+      size_t video_dev_len = 20;
+      char* video_dev = new char[video_dev_len];
+      int ret_len = 0;
+      while ((ret_len = getline(&video_dev, &video_dev_len, fp)) > 0) {
+        init_success = false;
+        close_device();
+        m_device_name = std::string(video_dev, ret_len - 1);
+        RCLCPP_WARN_STREAM(rclcpp::get_logger("hobot_usb_cam"),
+                    "Try to open device [" << m_device_name << "]");
+        memset(video_dev, '0', video_dev_len);
+        if (configure_exe()) {
+          RCLCPP_WARN_STREAM(rclcpp::get_logger("hobot_usb_cam"),
+                      "Open & Init device " << m_device_name << " success.");
+          init_success = true;
+          break;
+        }
+      }
+      delete []video_dev;
+    }
+  }
+  if (init_success == false) {
+    throw strerror(errno);
+  }
+}
+
+bool UsbCam::configure_exe()
+{
+  try {
+    // Open device file descriptor before anything else
+    open_device();
+    init_device();
+  } catch (...) {
+    return false;
+  }
+  return true;
+
 }
 
 void UsbCam::start()

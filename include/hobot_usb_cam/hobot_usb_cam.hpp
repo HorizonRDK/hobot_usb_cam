@@ -358,6 +358,7 @@ private:
 
   void uninit_device();
   void close_device();
+  bool configure_exe();
 
   std::string m_device_name;
   usb_cam::utils::io_method_t m_io;
