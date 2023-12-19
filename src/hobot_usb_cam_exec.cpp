@@ -12,18 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "hobot_usb_cam_node.hpp"
+#include "hobot_usb_cam/hobot_usb_cam_node.hpp"
 
 #include <memory>
 
 #include "rclcpp/rclcpp.hpp"
 
-using hobot_usb_cam::HobotUSBCamNode;
+using usb_cam::HobotUsbCamNode;
 
 int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
   rclcpp::NodeOptions opt;
-  auto node = std::make_shared<HobotUSBCamNode>(opt);
+  auto node = std::make_shared<HobotUsbCamNode>(opt);
   rclcpp::executors::SingleThreadedExecutor exec;
   exec.add_node(node);
   exec.spin();

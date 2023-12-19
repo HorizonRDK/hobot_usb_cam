@@ -1,308 +1,425 @@
-// Copyright (c) 2022，Horizon Robotics.
+// Copyright 2014 Robert Bosch, LLC
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+//    * Redistributions of source code must retain the above copyright
+//      notice, this list of conditions and the following disclaimer.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-#include "hobot_usb_cam.hpp"
-
-#include <sys/sysinfo.h>
-#include <yaml-cpp/yaml.h>
-
-#include <rclcpp/rclcpp.hpp>
-
-#include "sensor_msgs/distortion_models.hpp"
-
-extern "C" {
-#include <assert.h>
-#include <errno.h>
-#include <fcntl.h> /* low-level i/o */
-#include <linux/videodev2.h>
-#include <sys/ioctl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
-}
-
-namespace hobot_usb_cam {
+//    * Redistributions in binary form must reproduce the above copyright
+//      notice, this list of conditions and the following disclaimer in the
+//      documentation and/or other materials provided with the distribution.
+//
+//    * Neither the name of the Robert Bosch, LLC nor the names of its
+//      contributors may be used to endorse or promote products derived from
+//      this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+// POSSIBILITY OF SUCH DAMAGE.
 
 #define CLEAR(x) memset(&(x), 0, sizeof(x))
 
-HobotUSBCam::HobotUSBCam()
-    : cam_state_(kSTATE_UNINITIALLED), cam_fd_(-1), buffer_numbers_(4) {
-  buffers_ = new CamBuffer[buffer_numbers_];
+#include <sys/sysinfo.h>
+#include <yaml-cpp/yaml.h>
+#include <rclcpp/rclcpp.hpp>
+#include "sensor_msgs/distortion_models.hpp"
+
+extern "C" {
+#include <linux/videodev2.h>  // Defines V4L2 format constants
+#include <malloc.h>  // for memalign
+#include <sys/mman.h>  // for mmap
+#include <sys/stat.h>  // for stat
+#include <unistd.h>  // for getpagesize()
+#include <fcntl.h>  // for O_* constants and open()
 }
 
-HobotUSBCam::~HobotUSBCam() { delete[] buffers_; }
+#include <chrono>
+#include <ctime>
+#include <iostream>
+#include <memory>
+#include <string>
+#include <vector>
 
-bool HobotUSBCam::Init(CamInformation &cam_information) {
-  std::lock_guard<std::mutex> lock(cam_mutex_);
-  if (cam_state_ != kSTATE_UNINITIALLED) {
-    RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
-                 "Camera state is not kSTATE_UNINITIALLED, current state:%d\n",
-                 cam_state_);
-    return false;
-  }
+#include "opencv2/imgproc.hpp"
 
-  cam_information_ = cam_information;
-  // memcpy(&cam_information_, cam_information, sizeof(CamInformation));
+#include "hobot_usb_cam/hobot_usb_cam.hpp"
+#include "hobot_usb_cam/conversions.hpp"
+#include "hobot_usb_cam/utils.hpp"
 
-  video_dev_ = cam_information_.dev;
 
-  // 打开并且初始化USB设备成功的标志
-  bool init_success = false;
-  RCLCPP_WARN_STREAM(rclcpp::get_logger("hobot_usb_cam"),
-              "Start to open device " << video_dev_ << ".");
-  if (!OpenDevice() || !InitDevice()) {
-    RCLCPP_ERROR_STREAM(rclcpp::get_logger("hobot_usb_cam"),
-                "Open/Init device " << video_dev_ << " fail!");
-    CloseDevice();
+namespace usb_cam
+{
 
-    // 遍历/dev/下的video设备
-    // 使用 find 命令查找/dev/下的video设备
-    std::string command = "find /dev -name \"video[0-9]*\" | sort";
-    FILE* fp = popen(command.c_str(), "r");
-    if (!fp) {
-      return false;
-    }
-    size_t video_dev_len = 20;
-    char* video_dev = new char[video_dev_len];
-    int ret_len = 0;
-    while ((ret_len = getline(&video_dev, &video_dev_len, fp)) > 0) {
-      video_dev_ = std::string(video_dev, ret_len - 1);
-      RCLCPP_WARN_STREAM(rclcpp::get_logger("hobot_usb_cam"),
-                  "Try to open device [" << video_dev_ << "]");
-      memset(video_dev, '0', video_dev_len);
-      if (OpenDevice() && InitDevice()) {
-        RCLCPP_WARN_STREAM(rclcpp::get_logger("hobot_usb_cam"),
-                    "Open & Init device " << video_dev_ << " success.");
-        init_success = true;
-        break;
-      }
-    }
-    delete []video_dev;
+using utils::io_method_t;
+
+
+UsbCam::UsbCam()
+: m_device_name(), m_io(io_method_t::IO_METHOD_MMAP), m_fd(-1),
+  m_number_of_buffers(4), m_buffers(new usb_cam::utils::buffer[m_number_of_buffers]), m_image(),
+  m_avframe(NULL), m_avcodec(NULL), m_avoptions(NULL),
+  m_avcodec_context(NULL), m_is_capturing(false), m_framerate(0),
+  m_epoch_time_shift_us(usb_cam::utils::get_epoch_time_shift_us()), m_supported_formats()
+{}
+
+UsbCam::~UsbCam()
+{
+  shutdown();
+}
+
+
+/// @brief Fill destination image with source image. If required, convert a given
+/// V4L2 Image into another type. Look up possible V4L2 pixe formats in the
+/// `linux/videodev2.h` header file.
+/// @param src a pointer to a V4L2 source image
+/// @param dest a pointer to where the source image should be copied (if required)
+/// @param bytes_used number of bytes used by the src buffer
+void UsbCam::process_image(const char * src, char * & dest, const int & bytes_used)
+{
+  // TODO(flynneva): could we skip the copy here somehow?
+  // If no conversion required, just copy the image from V4L2 buffer
+  if (m_image.pixel_format->requires_conversion() == false) {
+    memcpy(dest, src, bytes_used);
+    m_image.data_size = bytes_used;
   } else {
-    RCLCPP_WARN_STREAM(rclcpp::get_logger("hobot_usb_cam"),
-                "Open & Init device " << video_dev_ << " success.");
-    init_success = true;
+    m_image.pixel_format->convert(src, dest, bytes_used);
+    m_image.data_size = m_image.size_in_bytes;
   }
-
-  if (!init_success) {
-    return false;
-  }
-
-  cam_information = cam_information_;
-  cam_state_ = kSTATE_INITIALLED;
-  return true;
 }
 
-void HobotUSBCam::GetFormats() {
-  RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
-              "This Camera Supported Formats:");
-  struct v4l2_fmtdesc fmt;
-  fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  fmt.index = 0;
-  for (fmt.index = 0; xioctl(cam_fd_, VIDIOC_ENUM_FMT, &fmt) == 0;
-       ++fmt.index) {  //获取device支持的格式
-    RCLCPP_INFO_STREAM(
-        rclcpp::get_logger("hobot_usb_cam"),
-        "  " << fmt.description << "[Index: " << fmt.index
-             << ", Type: " << fmt.type << ", Flags: " << fmt.flags
-             << ", PixelFormat: " << std::hex << fmt.pixelformat << "]");
-
-    struct v4l2_frmsizeenum size;
-    size.index = 0;
-    size.pixel_format = fmt.pixelformat;
-
-    for (size.index = 0; xioctl(cam_fd_, VIDIOC_ENUM_FRAMESIZES, &size) == 0;
-         ++size.index) {  //获取支持的分辨率
-      RCLCPP_INFO_STREAM(rclcpp::get_logger("hobot_usb_cam"),
-                         "  width: " << size.discrete.width
-                                     << " x height: " << size.discrete.height);
-      struct v4l2_frmivalenum interval;
-      interval.index = 0;
-      interval.pixel_format = size.pixel_format;
-      interval.width = size.discrete.width;
-      interval.height = size.discrete.height;
-      strFormats size_rate;
-      size_rate.width = interval.width;
-      size_rate.height = interval.height;
-      for (interval.index = 0;
-           xioctl(cam_fd_, VIDIOC_ENUM_FRAMEINTERVALS, &interval) == 0;
-           ++interval.index) {  //获取支持的帧率
-        if (interval.type == V4L2_FRMIVAL_TYPE_DISCRETE) {
-          RCLCPP_INFO_STREAM(rclcpp::get_logger("hobot_usb_cam"),
-                             "  " << interval.type << " "
-                                  << interval.discrete.numerator << " / "
-                                  << interval.discrete.denominator);
-          int rate =
-              interval.discrete.denominator / interval.discrete.numerator;
-          size_rate.frameRate.push_back(rate);
-        } else {
-          RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"), "other type");
+void UsbCam::read_frame()
+{
+  struct v4l2_buffer buf;
+  unsigned int i;
+  int len;
+  switch (m_io) {
+    case io_method_t::IO_METHOD_READ:
+      len = read(m_fd, m_buffers[0].start, m_buffers[0].length);
+      if (len == -1) {
+        switch (errno) {
+          case EAGAIN:
+            return;
+          default:
+            throw std::runtime_error("Unable to read frame");
         }
-      }  // interval loop
-      //信息保存
-      map_formats[fmt.pixelformat].push_back(size_rate);
-    }  // size loop
-  }    // fmt loop
-}
-
-bool HobotUSBCam::CheckResolutionFromFormats(int width, int height) {
-  uint32_t v4l2_fmt = V4L2_PIX_FMT_MJPEG;
-  //根据输入的pixel_format获取V4L2的格式数据，类型为unsigned int
-  switch (cam_information_.pixel_format) {
-    case kPIXEL_FORMAT_MJPEG:
-      v4l2_fmt = V4L2_PIX_FMT_MJPEG;
-      break;
-    case kPIXEL_FORMAT_YUYV:
-      v4l2_fmt = V4L2_PIX_FMT_YUYV;
-      break;
-    case kPIXEL_FORMAT_UYVY:
-      v4l2_fmt = V4L2_PIX_FMT_UYVY;
-      break;
-    case kPIXEL_FORMAT_YUVMONO10:
-      v4l2_fmt = V4L2_PIX_FMT_YUYV;
-      break;
-    case kPIXEL_FORMAT_RGB24:
-      v4l2_fmt = V4L2_PIX_FMT_RGB24;
-      break;
-    case kPIXEL_FORMAT_GREY:
-      v4l2_fmt = V4L2_PIX_FMT_GREY;
-      break;
-    default:
-      v4l2_fmt = V4L2_PIX_FMT_MJPEG;
-  }
-  auto it = map_formats.find(v4l2_fmt);  //从保存的信息中找到对应的格式
-  if (it != map_formats.end()) {
-    for (size_t i = 0; i < it->second.size(); ++i) {  //遍历支持的分辨率
-      if (it->second[i].width == width && it->second[i].height == height) {
-        return true;
       }
-    }
-    //输入的分辨率不支持，输出error log
-    std::stringstream ss_frame;
-    for (size_t i = 0; i < it->second.size(); ++i) {
-      ss_frame << it->second[i].width << "x" << it->second[i].height << " ";
-    }
-    RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
-                 "Resolution %dx%d is not supported! %sare supported!");
-  }
+      return process_image(m_buffers[0].start, m_image.data, len);
+    case io_method_t::IO_METHOD_MMAP:
+      CLEAR(buf);
+      buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+      m_image.v4l2_fmt.type = buf.type;
+      buf.memory = V4L2_MEMORY_MMAP;
 
-  return false;
+      // Get current v4l2 pixel format
+      if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_G_FMT), &m_image.v4l2_fmt)) {
+        switch (errno) {
+          case EAGAIN:
+            return;
+          default:
+            throw std::runtime_error("Invalid v4l2 format");
+        }
+      }
+      /// Dequeue buffer with the new image
+      if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_DQBUF), &buf)) {
+        switch (errno) {
+          case EAGAIN:
+            return;
+          default:
+            throw std::runtime_error("Unable to retrieve frame with mmap");
+        }
+      }
+      // Get timestamp from V4L2 image buffer
+      m_image.stamp = usb_cam::utils::calc_img_timestamp(buf.timestamp, m_epoch_time_shift_us);
+
+      assert(buf.index < m_number_of_buffers);
+      process_image(m_buffers[buf.index].start, m_image.data, buf.bytesused);
+      /// Requeue buffer so it can be reused
+      if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_QBUF), &buf)) {
+        throw std::runtime_error("Unable to exchange buffer with the driver");
+      }
+      return;
+    case io_method_t::IO_METHOD_USERPTR:
+      CLEAR(buf);
+
+      buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+      buf.memory = V4L2_MEMORY_USERPTR;
+
+      if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_DQBUF), &buf)) {
+        switch (errno) {
+          case EAGAIN:
+            return;
+          default:
+            throw std::runtime_error("Unable to exchange buffer with driver");
+        }
+      }
+
+      // Get timestamp from V4L2 image buffer
+      m_image.stamp = usb_cam::utils::calc_img_timestamp(buf.timestamp, m_epoch_time_shift_us);
+
+      for (i = 0; i < m_number_of_buffers; ++i) {
+        if (buf.m.userptr == reinterpret_cast<uint64_t>(m_buffers[i].start) && \
+          buf.length == m_buffers[i].length)
+        {
+          return;
+        }
+      }
+
+      assert(i < m_number_of_buffers);
+      process_image(reinterpret_cast<const char *>(buf.m.userptr), m_image.data, buf.bytesused);
+      if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_QBUF), &buf)) {
+        throw std::runtime_error("Unable to exchange buffer with driver");
+      }
+      return;
+    case io_method_t::IO_METHOD_UNKNOWN:
+      throw std::invalid_argument("IO method unknown");
+  }
 }
 
-bool HobotUSBCam::OpenDevice() {
-  struct stat dev_stat;
-  if (stat(video_dev_.c_str(), &dev_stat) == -1) {
-    RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
-                 "Cannot identify '%s', errno: %d, err info: %s! Please make sure the "
-                 "video_device parameter is correct!",
-                 video_dev_.c_str(),
-                 errno,
-                 strerror(errno));
-    return false;
+void UsbCam::stop_capturing()
+{
+  if (!m_is_capturing) {return;}
+
+  m_is_capturing = false;
+  enum v4l2_buf_type type;
+
+  switch (m_io) {
+    case io_method_t::IO_METHOD_READ:
+      /* Nothing to do. */
+      return;
+    case io_method_t::IO_METHOD_MMAP:
+    case io_method_t::IO_METHOD_USERPTR:
+      type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+      if (-1 == usb_cam::utils::xioctl(m_fd, VIDIOC_STREAMOFF, &type)) {
+        // Set capturing variable to true again, since stream was not stopped successfully
+        m_is_capturing = true;
+        throw std::runtime_error("Unable to stop capturing stream");
+      }
+      return;
+    case io_method_t::IO_METHOD_UNKNOWN:
+      throw std::invalid_argument("IO method unknown");
   }
-  if (!S_ISCHR(dev_stat.st_mode)) {
-    RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
-                 "%s is not a character device! Please make sure the "
-                 "video_device parameter is correct!",
-                 video_dev_.c_str(),
-                 errno,
-                 strerror(errno));
-    return false;
-  }
-  cam_fd_ = open(video_dev_.c_str(), O_RDWR | O_NONBLOCK, 0);
-  if (cam_fd_ == -1) {
-    RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
-                 "Cannot open '%s': %d, %s! Please make sure the video_device "
-                 "parameter is correct!",
-                 video_dev_.c_str(),
-                 errno,
-                 strerror(errno));
-    return false;
-  }
-  GetFormats();
-  return true;
 }
 
-bool HobotUSBCam::InitDevice() {
-  struct v4l2_capability camera_capability;
-  struct v4l2_cropcap camera_cropcap;
-  struct v4l2_crop camera_crop;
-  struct v4l2_format camera_format;
-  unsigned int min;
+void UsbCam::start_capturing()
+{
+  if (m_is_capturing) {return;}
 
-  if (xioctl(cam_fd_, VIDIOC_QUERYCAP, &camera_capability) == -1) {
+  unsigned int i;
+  enum v4l2_buf_type type;
+
+  switch (m_io) {
+    case io_method_t::IO_METHOD_READ:
+      /* Nothing to do. */
+      break;
+    case io_method_t::IO_METHOD_MMAP:
+      // Queue the buffers
+      for (i = 0; i < m_number_of_buffers; ++i) {
+        struct v4l2_buffer buf;
+        CLEAR(buf);
+
+        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+        buf.index = i;
+
+        if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_QBUF), &buf)) {
+          throw std::runtime_error("Unable to queue image buffer");
+        }
+      }
+
+      // Start the stream
+      type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+      if (-1 == usb_cam::utils::xioctl(m_fd, VIDIOC_STREAMON, &type)) {
+        throw std::runtime_error("Unable to start stream");
+      }
+      break;
+    case io_method_t::IO_METHOD_USERPTR:
+      for (i = 0; i < m_number_of_buffers; ++i) {
+        struct v4l2_buffer buf;
+
+        CLEAR(buf);
+
+        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_USERPTR;
+        buf.index = i;
+        buf.m.userptr = reinterpret_cast<uint64_t>(m_buffers[i].start);
+        buf.length = m_buffers[i].length;
+
+        if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_QBUF), &buf)) {
+          throw std::runtime_error("Unable to configure stream");
+        }
+      }
+
+      type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+      if (-1 == usb_cam::utils::xioctl(m_fd, VIDIOC_STREAMON, &type)) {
+        throw std::runtime_error("Unable to start stream");
+      }
+      break;
+    case io_method_t::IO_METHOD_UNKNOWN:
+      throw std::invalid_argument("IO method unknown");
+  }
+  m_is_capturing = true;
+}
+
+void UsbCam::uninit_device()
+{
+  m_buffers.reset();
+}
+
+void UsbCam::init_read()
+{
+  if (!m_buffers) {
+    throw std::overflow_error("Out of memory");
+  }
+
+  m_buffers[0].length = m_image.size_in_bytes;
+
+  if (!m_buffers[0].start) {
+    throw std::overflow_error("Out of memory");
+  }
+}
+
+void UsbCam::init_mmap()
+{
+  struct v4l2_requestbuffers req;
+
+  CLEAR(req);
+
+  req.count = m_number_of_buffers;
+  req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  req.memory = V4L2_MEMORY_MMAP;
+
+  if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_REQBUFS), &req)) {
     if (EINVAL == errno) {
-      RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
-                   "%s is no V4L2 device! Please use the v4l2 command "
-                   "'sudo v4l2-ctl -d %s --all' to confirm that"
-                   " the USB camera is working\\n",
-                   video_dev_.c_str(),
-                   video_dev_.c_str());
-      return false;
+      throw std::runtime_error("Device does not support memory mapping");
     } else {
-      errno_exit("VIDIOC_QUERYCAP");
+      throw std::runtime_error("Unable to initialize memory mapping");
     }
   }
 
-  if (!(camera_capability.capabilities & V4L2_CAP_VIDEO_CAPTURE)) {
-    RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
-                 "%s is not video capture device! Please use the v4l2 command "
-                 "'sudo v4l2-ctl -d %s --all' to confirm that"
-                 " the USB camera is working.",
-                 video_dev_.c_str(),
-                 video_dev_.c_str());
-    return false;
+  if (req.count < m_number_of_buffers) {
+    throw std::overflow_error("Insufficient buffer memory on device");
   }
 
-  switch (cam_information_.io) {
-    case kIO_METHOD_READ:
-      if (!(camera_capability.capabilities & V4L2_CAP_READWRITE)) {
-        RCLCPP_ERROR(
-            rclcpp::get_logger("hobot_usb_cam"),
-            "%s does not support read i/o! Please use the v4l2 command "
-            "'sudo v4l2-ctl -d %s --all' to confirm that"
-            " the USB camera is working\\n",
-            video_dev_.c_str(),
-            video_dev_.c_str());
-        return false;
-      }
-      break;
-
-    case kIO_METHOD_MMAP:
-    case kIO_METHOD_USERPTR:
-      if (!(camera_capability.capabilities & V4L2_CAP_STREAMING)) {
-        RCLCPP_ERROR(
-            rclcpp::get_logger("hobot_usb_cam"),
-            "%s does not support streaming i/o! Please use the v4l2 command "
-            "'sudo v4l2-ctl -d %s --all' to confirm that"
-            " the USB camera is working\\n",
-            video_dev_.c_str(),
-            video_dev_.c_str());
-        return false;
-      }
-      break;
+  if (!m_buffers) {
+    throw std::overflow_error("Out of memory");
   }
+
+  for (uint32_t current_buffer = 0; current_buffer < req.count; ++current_buffer) {
+    struct v4l2_buffer buf;
+
+    CLEAR(buf);
+
+    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    buf.memory = V4L2_MEMORY_MMAP;
+    buf.index = current_buffer;
+
+    if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_QUERYBUF), &buf)) {
+      throw std::runtime_error("Unable to query status of buffer");
+    }
+
+    m_buffers[current_buffer].length = buf.length;
+    m_buffers[current_buffer].start =
+      reinterpret_cast<char *>(mmap(
+        NULL /* start anywhere */, buf.length, PROT_READ | PROT_WRITE /* required */,
+        MAP_SHARED /* recommended */, m_fd, buf.m.offset));
+
+    if (MAP_FAILED == m_buffers[current_buffer].start) {
+      throw std::runtime_error("Unable to allocate memory for image buffers");
+    }
+  }
+}
+
+void UsbCam::init_userp()
+{
+  struct v4l2_requestbuffers req;
+  unsigned int page_size;
+
+  page_size = getpagesize();
+  auto buffer_size = (m_image.size_in_bytes + page_size - 1) & ~(page_size - 1);
+
+  CLEAR(req);
+
+  req.count = m_number_of_buffers;
+  req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  req.memory = V4L2_MEMORY_USERPTR;
+
+  if (-1 == usb_cam::utils::xioctl(m_fd, VIDIOC_REQBUFS, &req)) {
+    if (EINVAL == errno) {
+      throw std::invalid_argument("Device does not support user pointer i/o");
+    } else {
+      throw std::invalid_argument("Unable to initialize memory mapping");
+    }
+  }
+
+  if (!m_buffers) {
+    throw std::overflow_error("Out of memory");
+  }
+
+  for (uint32_t current_buffer = 0; current_buffer < req.count; ++current_buffer) {
+    m_buffers[current_buffer].length = buffer_size;
+    m_buffers[current_buffer].start =
+      reinterpret_cast<char *>(memalign(/* boundary */ page_size, buffer_size));
+
+    if (!m_buffers[current_buffer].start) {
+      throw std::overflow_error("Out of memory");
+    }
+  }
+}
+
+void UsbCam::init_device()
+{
+  struct v4l2_capability cap;
+  struct v4l2_cropcap cropcap;
+  struct v4l2_crop crop;
+
+  if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_QUERYCAP), &cap)) {
+    if (EINVAL == errno) {
+      throw std::invalid_argument("Device is not a V4L2 device");
+    } else {
+      throw std::invalid_argument("Unable to query device capabilities");
+    }
+  }
+
+  if (!(cap.capabilities & V4L2_CAP_VIDEO_CAPTURE)) {
+    throw std::invalid_argument("Device is not a video capture device");
+  }
+
+  switch (m_io) {
+    case io_method_t::IO_METHOD_READ:
+      if (!(cap.capabilities & V4L2_CAP_READWRITE)) {
+        throw std::invalid_argument("Device does not support read i/o");
+      }
+      break;
+    case io_method_t::IO_METHOD_MMAP:
+    case io_method_t::IO_METHOD_USERPTR:
+      if (!(cap.capabilities & V4L2_CAP_STREAMING)) {
+        throw std::invalid_argument("Device does not support streaming i/o");
+      }
+      break;
+    case io_method_t::IO_METHOD_UNKNOWN:
+      throw std::invalid_argument("Unsupported IO method specified");
+  }
+
   /* Select video input, video standard and tune here. */
-  CLEAR(camera_cropcap);
-  camera_cropcap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
-  if (xioctl(cam_fd_, VIDIOC_CROPCAP, &camera_cropcap) == 0) {
-    camera_crop.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    camera_crop.c = camera_cropcap.defrect; /* reset to default */
+  CLEAR(cropcap);
 
-    if (-1 == xioctl(cam_fd_, VIDIOC_S_CROP, &camera_crop)) {
+  cropcap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+  if (0 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_CROPCAP), &cropcap)) {
+    crop.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    crop.c = cropcap.defrect; /* reset to default */
+
+    if (-1 == usb_cam::utils::xioctl(m_fd, VIDIOC_S_CROP, &crop)) {
       switch (errno) {
         case EINVAL:
           /* Cropping not supported. */
@@ -315,562 +432,352 @@ bool HobotUSBCam::InitDevice() {
   } else {
     /* Errors ignored. */
   }
-  CLEAR(camera_format);
-  camera_format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  camera_format.fmt.pix.width = cam_information_.image_width;
-  camera_format.fmt.pix.height = cam_information_.image_height;
-  switch (cam_information_.pixel_format) {
-    case kPIXEL_FORMAT_MJPEG:
-      camera_format.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
-      break;
-    case kPIXEL_FORMAT_YUYV:
-      camera_format.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
-      break;
-    case kPIXEL_FORMAT_UYVY:
-      camera_format.fmt.pix.pixelformat = V4L2_PIX_FMT_UYVY;
-      break;
-    case kPIXEL_FORMAT_YUVMONO10:
-      camera_format.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
-      break;
-    case kPIXEL_FORMAT_RGB24:
-      camera_format.fmt.pix.pixelformat = V4L2_PIX_FMT_RGB24;
-      break;
-    case kPIXEL_FORMAT_GREY:
-      camera_format.fmt.pix.pixelformat = V4L2_PIX_FMT_GREY;
-      break;
-    default:
-      camera_format.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
-  }
-  camera_format.fmt.pix.field = V4L2_FIELD_INTERLACED;
-  if (xioctl(cam_fd_, VIDIOC_S_FMT, &camera_format) == -1)
-    errno_exit("VIDIOC_S_FMT");
-  if (camera_format.fmt.pix.width == (uint32_t)cam_information_.image_width &&
-      camera_format.fmt.pix.height == (uint32_t)cam_information_.image_height) {
-    RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
-                "Set resolution to %dx%d\n",
-                cam_information_.image_width,
-                cam_information_.image_height);
-  } else {
-    std::stringstream ss;
-    ss << "Resolution " << cam_information_.image_width << "x"
-       << cam_information_.image_height << " is not support! ";
-    auto it = map_formats.find(camera_format.fmt.pix.pixelformat);
-    if (it != map_formats.end()) {  //获取支持的分辨率
-      for (size_t i = 0; i < it->second.size(); ++i) {
-        ss << it->second[i].width << "x" << it->second[i].height << " ";
-      }
-    }
-    ss << "are supported."
-       << "\n";
-    RCLCPP_WARN(rclcpp::get_logger("hobot_usb_cam"), "%s", ss.str().c_str());
 
-    cam_information_.image_width = camera_format.fmt.pix.width;
-    cam_information_.image_height = camera_format.fmt.pix.height;
-    RCLCPP_WARN(rclcpp::get_logger("hobot_usb_cam"),
-                "Usb resolution %dx%d instead\n",
-                cam_information_.image_width,
-                cam_information_.image_height);
-  }
-  /* Buggy driver paranoia. */
-  min = camera_format.fmt.pix.width * 2;
-  if (camera_format.fmt.pix.bytesperline < min)
-    camera_format.fmt.pix.bytesperline = min;
-  min = camera_format.fmt.pix.bytesperline * camera_format.fmt.pix.height;
-  if (camera_format.fmt.pix.sizeimage < min)
-    camera_format.fmt.pix.sizeimage = min;
+  m_image.v4l2_fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  m_image.v4l2_fmt.fmt.pix.width = m_image.width;
+  m_image.v4l2_fmt.fmt.pix.height = m_image.height;
+  m_image.v4l2_fmt.fmt.pix.pixelformat = m_image.pixel_format->v4l2();
+  m_image.v4l2_fmt.fmt.pix.field = V4L2_FIELD_ANY;
 
-  if (cam_information_.framerate > 0) {
-    struct v4l2_streamparm stream_params;
-    memset(&stream_params, 0, sizeof(stream_params));
-    stream_params.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (xioctl(cam_fd_, VIDIOC_G_PARM, &stream_params) < 0) {
-      RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
-                   "can't set stream params %d",
-                   errno);
-      return false;
-    }
-    if (!(stream_params.parm.capture.capability & V4L2_CAP_TIMEPERFRAME)) {
-      cam_information_.framerate =
-          stream_params.parm.capture.timeperframe.denominator /
-          stream_params.parm.capture.timeperframe.numerator;
-      RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
-                   "V4L2_CAP_TIMEPERFRAME not supported."
-                   " Use camera default framerate:%d\n",
-                   cam_information_.framerate);
-    } else {
-      stream_params.parm.capture.timeperframe.numerator = 1;
-      stream_params.parm.capture.timeperframe.denominator =
-          cam_information_.framerate;
-      if (xioctl(cam_fd_, VIDIOC_S_PARM, &stream_params) < 0) {
-        std::stringstream ss_frame;
-        auto it = map_formats.find(camera_format.fmt.pix.pixelformat);
-        if (it != map_formats.end()) {  //获取支持的分辨率
-          for (size_t i = 0; i < it->second.size(); ++i) {
-            if (it->second[i].width == cam_information_.image_width &&
-                it->second[i].height ==
-                    cam_information_.image_height) {  //获取支持的frametrate
-              for (size_t j = 0; j < it->second[i].frameRate.size(); ++j) {
-                ss_frame << it->second[i].frameRate[j] << " ";
-              }
-            }
-          }
-        }
-        ss_frame << "are supported."
-                 << "\n";
-        cam_information_.framerate =
-            stream_params.parm.capture.timeperframe.denominator /
-            stream_params.parm.capture.timeperframe.numerator;
-        RCLCPP_ERROR(
-            rclcpp::get_logger("hobot_usb_cam"),
-            "Set camera framerate failed! %s Use framerate:%d instead\n",
-            ss_frame.str().c_str(),
-            cam_information_.framerate);
-      } else {
-        if (stream_params.parm.capture.timeperframe.denominator ==
-            (uint32_t)cam_information_.framerate) {
-          RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
-                      "Set framerate to be %d\n",
-                      cam_information_.framerate);
-        } else {
-          cam_information_.framerate =
-              stream_params.parm.capture.timeperframe.denominator /
-              stream_params.parm.capture.timeperframe.numerator;
-          RCLCPP_WARN(rclcpp::get_logger("hobot_usb_cam"),
-                      "Camera not supported set frame. "
-                      " Use camera default framerate:%d\n",
-                      cam_information_.framerate);
-        }
-      }
-    }
+  // Set v4l2 capture format
+  // Note VIDIOC_S_FMT may change width and height
+  if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_S_FMT), &m_image.v4l2_fmt)) {
+    throw strerror(errno);
   }
 
-  switch (cam_information_.io) {
-    case kIO_METHOD_READ:
-      if (InitRead(camera_format.fmt.pix.sizeimage) == false) {
-        return false;
-      }
-      break;
+  struct v4l2_streamparm stream_params;
+  memset(&stream_params, 0, sizeof(stream_params));
+  stream_params.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  if (usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_G_PARM), &stream_params) < 0) {
+    throw strerror(errno);
+  }
 
-    case kIO_METHOD_MMAP:
-      if (InitMmap() == false) {
-        return false;
-      }
-      break;
+  if (!stream_params.parm.capture.capability && V4L2_CAP_TIMEPERFRAME) {
+    throw "V4L2_CAP_TIMEPERFRAME not supported";
+  }
 
-    case kIO_METHOD_USERPTR:
-      if (InitUserspace(camera_format.fmt.pix.sizeimage) == false) {
-        return false;
-      }
+  // TODO(lucasw) need to get list of valid numerator/denominator pairs
+  // and match closest to what user put in.
+  stream_params.parm.capture.timeperframe.numerator = 1;
+  stream_params.parm.capture.timeperframe.denominator = m_framerate;
+  if (usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_S_PARM), &stream_params) < 0) {
+    throw std::invalid_argument("Couldn't set camera framerate");
+  }
+
+  switch (m_io) {
+    case io_method_t::IO_METHOD_READ:
+      init_read();
+      break;
+    case io_method_t::IO_METHOD_MMAP:
+      init_mmap();
+      break;
+    case io_method_t::IO_METHOD_USERPTR:
+      init_userp();
+      break;
+    case io_method_t::IO_METHOD_UNKNOWN:
+      // TODO(flynneva): log something
       break;
   }
-  return true;
 }
 
-int32_t HobotUSBCam::xioctl(int fh, uint32_t request, void *arg) {
-  int32_t r;
+void UsbCam::close_device()
+{
+  // Device is already closed
+  if (m_fd == -1) {return;}
 
-  do {
-    r = ioctl(fh, request, arg);
-  } while (-1 == r && EINTR == errno);
+  if (-1 == close(m_fd)) {
+    throw strerror(errno);
+  }
 
-  return r;
+  m_fd = -1;
 }
 
-void HobotUSBCam::errno_exit(const char *s) {
-  RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
-               "%s error %d, %s",
-               s,
-               errno,
-               strerror(errno));
+void UsbCam::open_device()
+{
+  struct stat st;
+
+  if (-1 == stat(m_device_name.c_str(), &st)) {
+    throw strerror(errno);
+  }
+
+  if (!S_ISCHR(st.st_mode)) {
+    throw strerror(errno);
+  }
+
+  m_fd = open(m_device_name.c_str(), O_RDWR /* required */ | O_NONBLOCK, 0);
+
+  if (-1 == m_fd) {
+    throw strerror(errno);
+  }
 }
 
-bool HobotUSBCam::InitRead(unsigned int buffer_size) {
-  buffers_[0].length = buffer_size;
-  buffers_[0].start = malloc(buffer_size);
+void UsbCam::configure(
+  parameters_t & parameters, const io_method_t & io_method)
+{
+  m_device_name = parameters.device_name;
+  m_io = io_method;
+  m_image.width = static_cast<int>(parameters.image_width);
+  m_image.height = static_cast<int>(parameters.image_height);
+  m_image.set_number_of_pixels();
 
-  if (!buffers_[0].start) {
-    struct sysinfo info;
-    auto ret = sysinfo(&info);
-    if (ret == 0) {
-      RCLCPP_ERROR(
-          rclcpp::get_logger("hobot_usb_cam"),
-          "Out of memory! The buff size: %d and System available memory "
-          "is: %ld byte\n\n",
-          buffer_size,
-          info.totalram);
-    }
-    return false;
-  }
-  return true;
-}
+  // Do this before calling set_bytes_per_line and set_size_in_bytes
+  m_image.pixel_format = set_pixel_format(parameters);
+  m_image.set_bytes_per_line();
+  m_image.set_size_in_bytes();
+  m_framerate = parameters.framerate;
+  bool init_success = true;
 
-bool HobotUSBCam::InitMmap(void) {
-  struct v4l2_requestbuffers requset_buffer;
-  unsigned int n_buffers;
-
-  CLEAR(requset_buffer);
-
-  requset_buffer.count = buffer_numbers_;
-  requset_buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  requset_buffer.memory = V4L2_MEMORY_MMAP;
-
-  if (xioctl(cam_fd_, VIDIOC_REQBUFS, &requset_buffer) == -1) {
-    if (EINVAL == errno) {
-      RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
-                   "%s does not support memory mappingn\\n",
-                   video_dev_.c_str());
-      return false;
-    } else {
-      errno_exit("VIDIOC_REQBUFS");
-    }
-  }
-
-  for (n_buffers = 0; n_buffers < requset_buffer.count; ++n_buffers) {
-    struct v4l2_buffer buffer;
-
-    CLEAR(buffer);
-
-    buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    buffer.memory = V4L2_MEMORY_MMAP;
-    buffer.index = n_buffers;
-
-    if (xioctl(cam_fd_, VIDIOC_QUERYBUF, &buffer) == -1)
-      errno_exit("VIDIOC_QUERYBUF");
-    buffers_[n_buffers].length = buffer.length;
-    buffers_[n_buffers].start = mmap(NULL /* start anywhere */,
-                                     buffer.length,
-                                     PROT_READ | PROT_WRITE /* required */,
-                                     MAP_SHARED /* recommended */,
-                                     cam_fd_,
-                                     buffer.m.offset);
-
-    if (MAP_FAILED == buffers_[n_buffers].start) errno_exit("mmap");
-  }
-  return true;
-}
-
-bool HobotUSBCam::InitUserspace(unsigned int buffer_size) {
-  struct v4l2_requestbuffers request_buffer;
-  unsigned int n_buffers;
-
-  CLEAR(request_buffer);
-
-  request_buffer.count = buffer_numbers_;
-  request_buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  request_buffer.memory = V4L2_MEMORY_USERPTR;
-
-  if (xioctl(cam_fd_, VIDIOC_REQBUFS, &request_buffer) == -1) {
-    if (EINVAL == errno) {
-      RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
-                   "%s does not support user pointer i/on\\n",
-                   video_dev_.c_str());
-      return false;
-    } else {
-      errno_exit("VIDIOC_REQBUFS");
-    }
-  }
-
-  for (n_buffers = 0; n_buffers < request_buffer.count; ++n_buffers) {
-    buffers_[n_buffers].length = buffer_size;
-    buffers_[n_buffers].start = malloc(buffer_size);
-    if (!buffers_[n_buffers].start) {
-      struct sysinfo info;
-      auto ret = sysinfo(&info);
-      if (ret == 0) {
-        RCLCPP_ERROR(
-            rclcpp::get_logger("hobot_usb_cam"),
-            "Out of memory! The buff size: %d and System available memory "
-            "is: %ld byte\n\n",
-            buffer_size,
-            info.totalram);
-      }
-      return false;
-    }
-  }
-  return true;
-}
-
-bool HobotUSBCam::CloseDevice(void) {
-  if (cam_fd_ == -1) {
-    RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
-                 "Camera fd is invalid, no need to close.");
-    return true;
-  }
-
-  if (close(cam_fd_) == -1) {
-    errno_exit("close");
-    return false;
-  }
-  cam_fd_ = -1;
-  return true;
-}
-
-bool HobotUSBCam::Start(void) {
-  int i;
-  enum v4l2_buf_type type;
-
-  std::lock_guard<std::mutex> lock(cam_mutex_);
-  if (cam_state_ != kSTATE_INITIALLED) {
-    RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
-                 "Camera state is not kSTATE_INITIALLED, current state:%d\n",
-                 cam_state_);
-    return false;
-  }
-  switch (cam_information_.io) {
-    case kIO_METHOD_READ:
-      /* Nothing to do. */
-      break;
-    case kIO_METHOD_MMAP:
-      for (i = 0; i < buffer_numbers_; ++i) {
-        struct v4l2_buffer buffer;
-
-        CLEAR(buffer);
-        buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        buffer.memory = V4L2_MEMORY_MMAP;
-        buffer.index = i;
-
-        if (xioctl(cam_fd_, VIDIOC_QBUF, &buffer) == -1)
-          errno_exit("VIDIOC_QBUF");
-      }
-      type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-      if (xioctl(cam_fd_, VIDIOC_STREAMON, &type) == -1)
-        errno_exit("VIDIOC_STREAMON");
-      break;
-    case kIO_METHOD_USERPTR:
-      for (i = 0; i < buffer_numbers_; ++i) {
-        struct v4l2_buffer buffer;
-
-        CLEAR(buffer);
-        buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        buffer.memory = V4L2_MEMORY_USERPTR;
-        buffer.index = i;
-        buffer.m.userptr = (unsigned long)buffers_[i].start;
-        buffer.length = buffers_[i].length;
-
-        if (xioctl(cam_fd_, VIDIOC_QBUF, &buffer) == -1)
-          errno_exit("VIDIOC_QBUF");
-      }
-      type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-      if (xioctl(cam_fd_, VIDIOC_STREAMON, &type) == -1)
-        errno_exit("VIDIOC_STREAMON");
-      break;
-  }
-  cam_state_ = kSTATE_RUNING;
-  return true;
-}
-
-bool HobotUSBCam::Stop(void) {
-  enum v4l2_buf_type type;
-
-  std::lock_guard<std::mutex> lock(cam_mutex_);
-  if (cam_state_ != kSTATE_RUNING) {
-    RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
-                 "Camera state is not kSTATE_RUNING, current state:%d\n",
-                 cam_state_);
-    return false;
-  }
-  switch (cam_information_.io) {
-    case kIO_METHOD_READ:
-      /* Nothing to do. */
-      break;
-
-    case kIO_METHOD_MMAP:
-    case kIO_METHOD_USERPTR:
-      type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-      if (-1 == xioctl(cam_fd_, VIDIOC_STREAMOFF, &type)) {
-        errno_exit("VIDIOC_STREAMOFF");
-        return false;
-      }
-      break;
-  }
-  cam_state_ = kSTATE_STOP;
-  return true;
-}
-
-bool HobotUSBCam::DeInit() {
-  bool ret = true;
-  int i;
-  std::lock_guard<std::mutex> lock(cam_mutex_);
-  if (cam_state_ != kSTATE_STOP) {
-    RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
-                 "Camera state is not kSTATE_STOP, current state:%d\n",
-                 cam_state_);
-    return false;
-  }
-  switch (cam_information_.io) {
-    case kIO_METHOD_READ:
-      free(buffers_[0].start);
-      break;
-    case kIO_METHOD_MMAP:
-      for (i = 0; i < buffer_numbers_; ++i)
-        if (-1 == munmap(buffers_[i].start, buffers_[i].length)) {
-          errno_exit("munmap");
-          ret = false;
-        }
-      break;
-    case kIO_METHOD_USERPTR:
-      for (i = 0; i < buffer_numbers_; ++i) free(buffers_[i].start);
-      break;
-  }
-  ret = CloseDevice();
-  cam_state_ = kSTATE_UNINITIALLED;
-  return ret;
-}
-
-bool HobotUSBCam::GetFrame(CamBuffer &cam_buffer) {
-  std::lock_guard<std::mutex> lock(cam_mutex_);
-  if (cam_state_ != kSTATE_RUNING) {
-    RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
-                 "GetFrame failed! Camera state is not kSTATE_RUNING, current "
-                 "state:%d\n",
-                 cam_state_);
-    return false;
-  }
-  for (;;) {
-    fd_set fds;
-    struct timeval tv;
-    int r;
-
-    FD_ZERO(&fds);
-    FD_SET(cam_fd_, &fds);
-
-    /* Timeout. */
-    tv.tv_sec = 2;
-    tv.tv_usec = 0;
-
-    r = select(cam_fd_ + 1, &fds, NULL, NULL, &tv);
-
-    if (-1 == r) {
-      if (EINTR == errno) continue;
-      errno_exit("select");
-    }
-
-    if (0 == r) {
-      RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
-                   "GetFrame failed! select timeout!\\n");
-      return false;
-    }
-
-    if (ReadFrame(cam_buffer)) break;
-    /* EAGAIN - continue select loop. */
-  }
-  return true;
-}
-
-bool HobotUSBCam::ReadFrame(CamBuffer &cam_buffer) {
-  struct v4l2_buffer buffer;
-  int i;
-
-  switch (cam_information_.io) {
-    case kIO_METHOD_READ:
-      if (read(cam_fd_, buffers_[0].start, buffers_[0].length) == -1) {
-        switch (errno) {
-          case EAGAIN:
-            return false;
-          case EIO:
-            /* Could ignore EIO, see spec. */
-
-            /* fall through */
-          default:
-            errno_exit("read");
-        }
-      }
-      cam_buffer.length = buffers_[0].length;
-      cam_buffer.start = buffers_[0].start;
-      cam_buffer.time_point = std::chrono::system_clock::now();
-      break;
-
-    case kIO_METHOD_MMAP:
-      CLEAR(buffer);
-
-      buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-      buffer.memory = V4L2_MEMORY_MMAP;
-
-      if (xioctl(cam_fd_, VIDIOC_DQBUF, &buffer) == -1) {
-        switch (errno) {
-          case EAGAIN:
-            return false;
-          case EIO:
-            /* Could ignore EIO, see spec. */
-
-            /* fall through */
-          default:
-            errno_exit("VIDIOC_DQBUF");
-            return false;
-        }
-      }
-      cam_buffer.length = buffer.bytesused;
-      cam_buffer.start = buffers_[buffer.index].start;
-      cam_buffer.time_point = std::chrono::system_clock::time_point{
-          std::chrono::seconds{buffer.timestamp.tv_sec} +
-          std::chrono::microseconds{buffer.timestamp.tv_usec}};
-      cam_buffer.reserved_buffer = buffer;
-      break;
-
-    case kIO_METHOD_USERPTR:
-      CLEAR(buffer);
-
-      buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-      buffer.memory = V4L2_MEMORY_USERPTR;
-
-      if (xioctl(cam_fd_, VIDIOC_DQBUF, &buffer) == -1) {
-        switch (errno) {
-          case EAGAIN:
-            return false;
-          case EIO:
-            /* Could ignore EIO, see spec. */
-
-            /* fall through */
-          default:
-            errno_exit("VIDIOC_DQBUF");
-            return false;
-        }
-      }
-
-      for (i = 0; i < buffer_numbers_; ++i)
-        if (buffer.m.userptr == (unsigned long)buffers_[i].start &&
-            buffer.length == buffers_[i].length)
+  if (!configure_exe()) {
+    // 遍历/dev/下的video设备
+    // 使用 find 命令查找/dev/下的video设备
+    std::string command = "find /dev -name \"video[0-9]*\" | sort";
+    FILE* fp = popen(command.c_str(), "r");
+    if (fp) {
+      size_t video_dev_len = 20;
+      char* video_dev = new char[video_dev_len];
+      int ret_len = 0;
+      while ((ret_len = getline(&video_dev, &video_dev_len, fp)) > 0) {
+        init_success = false;
+        close_device();
+        m_device_name = std::string(video_dev, ret_len - 1);
+        RCLCPP_WARN_STREAM(rclcpp::get_logger("hobot_usb_cam"),
+                    "Try to open device [" << m_device_name << "]");
+        memset(video_dev, '0', video_dev_len);
+        if (configure_exe()) {
+          RCLCPP_WARN_STREAM(rclcpp::get_logger("hobot_usb_cam"),
+                      "Open & Init device " << m_device_name << " success.");
+          init_success = true;
           break;
+        }
+      }
+      delete []video_dev;
+    }
+  }
+  if (init_success == false) {
+    throw strerror(errno);
+  }
+}
 
-      cam_buffer.length = buffer.bytesused;
-      cam_buffer.start = buffers_[i].start;
-      cam_buffer.time_point = std::chrono::system_clock::time_point{
-          std::chrono::seconds{buffer.timestamp.tv_sec} +
-          std::chrono::microseconds{buffer.timestamp.tv_usec}};
-      cam_buffer.reserved_buffer = buffer;
-      break;
+bool UsbCam::configure_exe()
+{
+  try {
+    // Open device file descriptor before anything else
+    open_device();
+    init_device();
+  } catch (...) {
+    return false;
+  }
+  return true;
+
+}
+
+void UsbCam::start()
+{
+  start_capturing();
+}
+
+void UsbCam::shutdown()
+{
+  stop_capturing();
+  uninit_device();
+  close_device();
+}
+
+/// @brief Grab new image from V4L2 device, return pointer to image
+/// @return pointer to image data
+char * UsbCam::get_image()
+{
+  if ((m_image.width == 0) || (m_image.height == 0)) {
+    return nullptr;
+  }
+  if (m_image.data == nullptr) {
+    m_image.data = (char*)malloc(m_image.size_in_bytes);
+  }
+  // grab the image
+  grab_image();
+  return m_image.data;
+}
+
+/// @brief Overload get_image so users can pass in an image pointer to fill
+/// @param destination destination to fill in with image
+void UsbCam::get_image(char * destination)
+{
+  if ((m_image.width == 0) || (m_image.height == 0)) {
+    return;
+  }
+  // Set the destination pointer to be filled
+  m_image.data = destination;
+  // grab the image
+  grab_image();
+}
+
+std::vector<capture_format_t> UsbCam::get_supported_formats()
+{
+  m_supported_formats.clear();
+  struct v4l2_fmtdesc * current_format = new v4l2_fmtdesc();
+  struct v4l2_frmsizeenum * current_size = new v4l2_frmsizeenum();
+  struct v4l2_frmivalenum * current_interval = new v4l2_frmivalenum();
+
+  current_format->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  current_format->index = 0;
+  for (current_format->index = 0;
+    usb_cam::utils::xioctl(
+      m_fd, VIDIOC_ENUM_FMT, current_format) == 0;
+    ++current_format->index)
+  {
+    current_size->index = 0;
+    current_size->pixel_format = current_format->pixelformat;
+
+    for (current_size->index = 0;
+      usb_cam::utils::xioctl(
+        m_fd, VIDIOC_ENUM_FRAMESIZES, current_size) == 0;
+      ++current_size->index)
+    {
+      current_interval->index = 0;
+      current_interval->pixel_format = current_size->pixel_format;
+      current_interval->width = current_size->discrete.width;
+      current_interval->height = current_size->discrete.height;
+      for (current_interval->index = 0;
+        usb_cam::utils::xioctl(
+          m_fd, VIDIOC_ENUM_FRAMEINTERVALS, current_interval) == 0;
+        ++current_interval->index)
+      {
+        if (current_interval->type == V4L2_FRMIVAL_TYPE_DISCRETE) {
+          capture_format_t capture_format;
+          capture_format.format = *current_format;
+          capture_format.v4l2_fmt = *current_interval;
+          m_supported_formats.push_back(capture_format);
+        }
+      }  // interval loop
+    }  // size loop
+  }  // fmt loop
+
+  delete (current_format);
+  delete (current_size);
+  delete (current_interval);
+
+  return m_supported_formats;
+}
+
+void UsbCam::grab_image()
+{
+  fd_set fds;
+  struct timeval tv;
+  int r;
+
+  FD_ZERO(&fds);
+  FD_SET(m_fd, &fds);
+
+  /* Timeout. */
+  tv.tv_sec = 5;
+  tv.tv_usec = 0;
+
+  r = select(m_fd + 1, &fds, NULL, NULL, &tv);
+
+  if (-1 == r) {
+    if (EINTR == errno) {
+      // interruped (e.g. maybe Ctrl + c) so don't throw anything
+      return;
+    }
+
+    std::cerr << "Something went wrong, exiting..." << errno << std::endl;
+    throw errno;
+  }
+
+  if (0 == r) {
+    std::cerr << "Select timeout, exiting..." << std::endl;
+    throw "select timeout";
+  }
+
+  read_frame();
+}
+
+// enables/disables auto focus
+bool UsbCam::set_auto_focus(int value)
+{
+  struct v4l2_queryctrl queryctrl;
+  struct v4l2_ext_control control;
+
+  memset(&queryctrl, 0, sizeof(queryctrl));
+  queryctrl.id = V4L2_CID_FOCUS_AUTO;
+
+  if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_QUERYCTRL), &queryctrl)) {
+    if (errno != EINVAL) {
+      std::cerr << "VIDIOC_QUERYCTRL" << std::endl;
+      return false;
+    } else {
+      std::cerr << "V4L2_CID_FOCUS_AUTO is not supported" << std::endl;
+      return false;
+    }
+  } else if (queryctrl.flags & V4L2_CTRL_FLAG_DISABLED) {
+    std::cerr << "V4L2_CID_FOCUS_AUTO is not supported" << std::endl;
+    return false;
+  } else {
+    memset(&control, 0, sizeof(control));
+    control.id = V4L2_CID_FOCUS_AUTO;
+    control.value = value;
+
+    if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_S_CTRL), &control)) {
+      std::cerr << "VIDIOC_S_CTRL" << std::endl;
+      return false;
+    }
   }
   return true;
 }
 
-bool HobotUSBCam::ReleaseFrame(CamBuffer &cam_buffer) {
-  bool ret = true;
-  std::lock_guard<std::mutex> lock(cam_mutex_);
-  if (cam_state_ != kSTATE_RUNING) {
-    RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
-                 "ReleaseFrame failed! Camera state is not kSTATE_RUNING, "
-                 "current state:%d\n",
-                 cam_state_);
-    return false;
-  }
-  switch (cam_information_.io) {
-    case kIO_METHOD_READ:
-      break;
-    case kIO_METHOD_MMAP:
-      if (xioctl(cam_fd_, VIDIOC_QBUF, &cam_buffer.reserved_buffer) == -1)
-        errno_exit("kIO_METHOD_MMAP VIDIOC_QBUF");
-      ret = false;
-      break;
-    case kIO_METHOD_USERPTR:
-      if (xioctl(cam_fd_, VIDIOC_QBUF, &cam_buffer.reserved_buffer) == -1)
-        errno_exit("kIO_METHOD_USERPTR VIDIOC_QBUF");
-      ret = false;
-      break;
-  }
-  return ret;
+/**
+* Set video device parameter via call to v4l-utils.
+*
+* @param param The name of the parameter to set
+* @param param The value to assign
+*/
+bool UsbCam::set_v4l_parameter(const std::string & param, int value)
+{
+  char buf[33];
+  snprintf(buf, sizeof(buf), "%i", value);
+  return set_v4l_parameter(param, buf);
 }
 
-bool HobotUSBCam::ReadCalibrationFile(
+/**
+* Set video device parameter via call to v4l-utils.
+*
+* @param param The name of the parameter to set
+* @param param The value to assign
+*/
+bool UsbCam::set_v4l_parameter(const std::string & param, const std::string & value)
+{
+  int retcode = 0;
+  // build the command
+  std::stringstream ss;
+  ss << "v4l2-ctl --device=" << m_device_name << " -c " << param << "=" << value << " 2>&1";
+  std::string cmd = ss.str();
+
+  // capture the output
+  std::string output;
+  const int kBufferSize = 256;
+  char buffer[kBufferSize];
+  FILE * stream = popen(cmd.c_str(), "r");
+  if (stream) {
+    while (!feof(stream)) {
+      if (fgets(buffer, kBufferSize, stream) != NULL) {
+        output.append(buffer);
+      }
+    }
+    pclose(stream);
+    // any output should be an error
+    if (output.length() > 0) {
+      std::cout << output.c_str() << std::endl;
+      retcode = 1;
+    }
+  } else {
+    std::cerr << "usb_cam_node could not run '" << cmd.c_str() << "'" << std::endl;
+    retcode = 1;
+  }
+  return retcode;
+}
+
+
+bool UsbCam::ReadCalibrationFile(
     sensor_msgs::msg::CameraInfo &cam_calibration_info,
     const std::string &file_path) {
   try {
@@ -941,4 +848,5 @@ bool HobotUSBCam::ReadCalibrationFile(
     return false;
   }
 }
-}  // namespace hobot_usb_cam
+
+}  // namespace usb_cam
