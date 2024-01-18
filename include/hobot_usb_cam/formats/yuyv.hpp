@@ -55,6 +55,21 @@ public:
   {}
 };
 
+class NV21 : public pixel_format_base
+{
+public:
+  NV21()
+  : pixel_format_base(
+      "nv21",
+      V4L2_PIX_FMT_NV21,
+      usb_cam::constants::NV21,
+      2,
+      8,
+      false)
+  {}
+};
+
+
 
 class YUYV2RGB : public pixel_format_base
 {

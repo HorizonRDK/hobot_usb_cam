@@ -47,7 +47,7 @@ public:
   RGB8()
   : pixel_format_base(
       "rgb8",
-      V4L2_PIX_FMT_RGB332,
+      V4L2_PIX_FMT_RGB24,
       usb_cam::constants::RGB8,
       3,
       8,

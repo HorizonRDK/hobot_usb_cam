@@ -86,6 +86,7 @@ void UsbCam::process_image(const char * src, char * & dest, const int & bytes_us
 {
   // TODO(flynneva): could we skip the copy here somehow?
   // If no conversion required, just copy the image from V4L2 buffer
+
   if (m_image.pixel_format->requires_conversion() == false) {
     memcpy(dest, src, bytes_used);
     m_image.data_size = bytes_used;
@@ -140,6 +141,8 @@ void UsbCam::read_frame()
       m_image.stamp = usb_cam::utils::calc_img_timestamp(buf.timestamp, m_epoch_time_shift_us);
 
       assert(buf.index < m_number_of_buffers);
+      RCLCPP_INFO(rclcpp::get_logger("hobot_usb_cam"),
+                  "bufd.bytesused:%d,fmt: %d",buf.bytesused,m_image.v4l2_fmt.fmt.pix.pixelformat);
       process_image(m_buffers[buf.index].start, m_image.data, buf.bytesused);
       /// Requeue buffer so it can be reused
       if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_QBUF), &buf)) {
@@ -433,15 +436,30 @@ void UsbCam::init_device()
     /* Errors ignored. */
   }
 
+  RCLCPP_WARN(rclcpp::get_logger("hobot_usb_cam"), "This devices supproted formats:");
+  for (auto fmt : supported_formats()) {
+    RCLCPP_WARN(
+      rclcpp::get_logger("hobot_usb_cam"),
+      "\t%s: %d x %d (%d Hz)",
+      fmt.format.description,
+      fmt.v4l2_fmt.width,
+      fmt.v4l2_fmt.height,
+      fmt.v4l2_fmt.discrete.denominator / fmt.v4l2_fmt.discrete.numerator);
+  }
+
   m_image.v4l2_fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   m_image.v4l2_fmt.fmt.pix.width = m_image.width;
   m_image.v4l2_fmt.fmt.pix.height = m_image.height;
   m_image.v4l2_fmt.fmt.pix.pixelformat = m_image.pixel_format->v4l2();
   m_image.v4l2_fmt.fmt.pix.field = V4L2_FIELD_ANY;
-
   // Set v4l2 capture format
   // Note VIDIOC_S_FMT may change width and height
   if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_S_FMT), &m_image.v4l2_fmt)) {
+    throw strerror(errno);
+  }
+  if (m_image.v4l2_fmt.fmt.pix.pixelformat != m_image.pixel_format->v4l2()) {
+    RCLCPP_ERROR(rclcpp::get_logger("hobot_usb_cam"),
+                  "this device isn't support pixel format %s", m_image.pixel_format->name().c_str());
     throw strerror(errno);
   }
 
