@@ -68,7 +68,7 @@ HobotUsbCamNode::HobotUsbCamNode(const rclcpp::NodeOptions & node_options)
   this->declare_parameter("image_height", 480);
   this->declare_parameter("image_width", 640);
   this->declare_parameter("io_method", "mmap");
-  this->declare_parameter("pixel_format", "yuyv");
+  this->declare_parameter("pixel_format", "mjpeg");
   this->declare_parameter("av_device_format", "YUV422P");
   this->declare_parameter("video_device", "/dev/video8");
   this->declare_parameter("brightness", 50);  // 0-255, -1 "leave alone"
@@ -187,18 +187,6 @@ void HobotUsbCamNode::init()
 
   // configure the camera
   m_camera->configure(m_parameters, io_method);
-
-  RCLCPP_INFO(this->get_logger(), "This devices supproted formats:");
-  for (auto fmt : m_camera->supported_formats()) {
-    RCLCPP_INFO(
-      this->get_logger(),
-      "\t%s: %d x %d (%d Hz)",
-      fmt.format.description,
-      fmt.v4l2_fmt.width,
-      fmt.v4l2_fmt.height,
-      fmt.v4l2_fmt.discrete.denominator / fmt.v4l2_fmt.discrete.numerator);
-  }
-
   set_v4l2_params();
 
   // start the camera
@@ -377,7 +365,7 @@ bool HobotUsbCamNode::take_and_send_image()
   }
   // grab the image, pass image msg buffer to fill
   m_camera->get_image(reinterpret_cast<char *>(&m_image_msg->data[0]));
-
+  RCLCPP_INFO(this->get_logger(), "take_and_send_image,size:%d", m_camera->get_image_data_size());
   auto stamp = m_camera->get_image_timestamp();
   m_image_msg->header.stamp.sec = stamp.tv_sec;
   m_image_msg->header.stamp.nanosec = stamp.tv_nsec;

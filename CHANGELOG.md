@@ -1,5 +1,10 @@
 # Changelog for package hobot_usb_cam
 
+tros_2.1.1 (2024-1-18)
+------------------
+1. 增加支持websocket浏览视频的launch。
+2. 增加对pixel_format配置与usb camera支持的format校验功能，当没有匹配的format突出node并提示客户更换合适pixel_format;
+
 tros_2.1.0 (2023-12-18)
 ------------------
 1. 重构hobot_usb_cam的这个代码，参考bosch的usb camera的代码，支持mjpeg,rgb,yuv等数据格式的输出。
