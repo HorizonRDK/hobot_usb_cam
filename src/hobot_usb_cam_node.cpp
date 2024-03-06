@@ -149,7 +149,7 @@ void HobotUsbCamNode::init()
 
   // if pixel format is equal to 'mjpeg', i.e. raw mjpeg stream, initialize compressed image message
   // and publisher
-  if (m_parameters.pixel_format_name == "mjpeg-compressed") {
+  if (m_parameters.pixel_format_name == "mjpeg") {
     m_compressed_img_msg.reset(new sensor_msgs::msg::CompressedImage());
     m_compressed_img_msg->header.frame_id = m_parameters.frame_id;
     m_compressed_image_publisher =
@@ -413,7 +413,7 @@ bool HobotUsbCamNode::hbmem_take_and_send_image() {
 
 bool HobotUsbCamNode::take_and_send_image_mjpeg()
 {
-  if (m_parameters.pixel_format_name == "mjpeg-compressed") {
+  if (m_parameters.pixel_format_name == "mjpeg") {
     m_compressed_img_msg->format = "jpeg";
     // grab the image, pass image msg buffer to fill
     auto data_buf = m_camera->get_image();
@@ -430,7 +430,7 @@ bool HobotUsbCamNode::take_and_send_image_mjpeg()
       m_camera_info_msg->header = m_compressed_img_msg->header;
       m_cam_info_publisher->publish(*m_camera_info_msg);
     }
-    RCLCPP_INFO(this->get_logger(), "take_and_send_image_mjpeg /mjpeg-compressed");
+    RCLCPP_INFO(this->get_logger(), "take_and_send_image_mjpeg");
   } else {
     // grab the image, pass image msg buffer to fill
     m_image_msg->width = m_camera->get_image_width();
@@ -480,8 +480,7 @@ void HobotUsbCamNode::update()
     // then that caps the framerate.
     // auto t0 = now();
     bool isSuccessful = m_parameters.zero_copy ? hbmem_take_and_send_image() : 
-      (((m_parameters.pixel_format_name == "mjpeg") || 
-        (m_parameters.pixel_format_name == "mjpeg-compressed")) ?
+      ((m_parameters.pixel_format_name == "mjpeg") ?
       take_and_send_image_mjpeg() : take_and_send_image());
 
     if (!isSuccessful) {

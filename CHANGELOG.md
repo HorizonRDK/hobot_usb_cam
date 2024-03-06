@@ -1,5 +1,11 @@
 # Changelog for package hobot_usb_cam
 
+tros_2.1.2 (2024-3-4)
+------------------
+1. 发布图像编码方式`pixel_format`配置项删除`mjpeg-compressed`配置选项，统一使用`mjpeg`配置选项指定发布`jpeg`压缩格式图片。
+2. `jpeg`压缩格式图片使用的数据类型由`sensor_msgs::msg::Image`变更为`sensor_msgs::msg::CompressedImage`。
+3. 配置文件路径由`/opt/tros/lib`变更为`/opt/tros/${TROS_DISTRO}/lib`。
+
 tros_2.1.1 (2024-1-18)
 ------------------
 1. 增加支持websocket浏览视频的launch。
