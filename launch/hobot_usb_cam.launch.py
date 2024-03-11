@@ -22,7 +22,7 @@ import os
 
 def generate_launch_description():
     config_file_path = os.path.join(
-        get_package_prefix('miphobot_usb_cami_cam'),
+        get_package_prefix('hobot_usb_cam'),
         "lib/hobot_usb_cam/config/usb_camera_calibration.yaml")
     print("config_file_path is ", config_file_path)
 

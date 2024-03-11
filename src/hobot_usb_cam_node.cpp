@@ -45,6 +45,7 @@ HobotUsbCamNode::HobotUsbCamNode(const rclcpp::NodeOptions & node_options)
   m_image_msg(new sensor_msgs::msg::Image()),
   m_compressed_img_msg(nullptr),
   m_compressed_image_publisher(nullptr),
+  m_image_publisher(nullptr),
   m_cam_info_publisher(nullptr),
   m_parameters(),
   m_camera_info_msg(new sensor_msgs::msg::CameraInfo()),
@@ -58,8 +59,6 @@ HobotUsbCamNode::HobotUsbCamNode(const rclcpp::NodeOptions & node_options)
         std::placeholders::_2,
         std::placeholders::_3)))
 {
-  //m_image_publisher = this->create_publisher<sensor_msgs::msg::Image>("image_raw", 10);
-  m_image_publisher = this->create_publisher<sensor_msgs::msg::Image>("image", 10);
   // declare params
   this->declare_parameter("camera_name", "default_cam");
   this->declare_parameter("camera_info_url", "");
@@ -154,7 +153,11 @@ void HobotUsbCamNode::init()
     m_compressed_img_msg->header.frame_id = m_parameters.frame_id;
     m_compressed_image_publisher =
       this->create_publisher<sensor_msgs::msg::CompressedImage>(
-      std::string(BASE_TOPIC_NAME) + "/compressed", rclcpp::QoS(100));
+      // std::string(BASE_TOPIC_NAME) + "/compressed",
+      "image",
+      rclcpp::QoS(100));
+  } else {
+    m_image_publisher = this->create_publisher<sensor_msgs::msg::Image>("image", 10);
   }
   m_cam_info_publisher =
       this->create_publisher<sensor_msgs::msg::CameraInfo>(
@@ -194,9 +197,11 @@ void HobotUsbCamNode::init()
 
 #ifdef USING_HBMEM
   // 创建hbmempub
-  hbmem_image_pub_1080_ =
-        this->create_publisher_hbmem<hbm_img_msgs::msg::HbmMsg1080P>(
-            "hbmem_img", 5);
+  if (m_parameters.zero_copy) {
+    hbmem_image_pub_1080_ =
+          this->create_publisher_hbmem<hbm_img_msgs::msg::HbmMsg1080P>(
+              "hbmem_img", 5);
+  }
 #endif
   // TODO(lucasw) should this check a little faster than expected frame rate?
   // TODO(lucasw) how to do small than ms, or fractional ms- std::chrono::nanoseconds?
@@ -413,50 +418,23 @@ bool HobotUsbCamNode::hbmem_take_and_send_image() {
 
 bool HobotUsbCamNode::take_and_send_image_mjpeg()
 {
-  if (m_parameters.pixel_format_name == "mjpeg") {
-    m_compressed_img_msg->format = "jpeg";
-    // grab the image, pass image msg buffer to fill
-    auto data_buf = m_camera->get_image();
-    m_compressed_img_msg->data.resize(m_camera->get_image_data_size());
-    memcpy(&m_compressed_img_msg->data[0], data_buf, m_camera->get_image_data_size());
+  m_compressed_img_msg->format = "jpeg";
+  // grab the image, pass image msg buffer to fill
+  auto data_buf = m_camera->get_image();
+  m_compressed_img_msg->data.resize(m_camera->get_image_data_size());
+  memcpy(&m_compressed_img_msg->data[0], data_buf, m_camera->get_image_data_size());
 
-    auto stamp = m_camera->get_image_timestamp();
-    m_compressed_img_msg->header.stamp.sec = stamp.tv_sec;
-    m_compressed_img_msg->header.stamp.nanosec = stamp.tv_nsec;
+  auto stamp = m_camera->get_image_timestamp();
+  m_compressed_img_msg->header.stamp.sec = stamp.tv_sec;
+  m_compressed_img_msg->header.stamp.nanosec = stamp.tv_nsec;
 
-    m_compressed_image_publisher->publish(*m_compressed_img_msg);
-    m_compressed_img_msg->data.resize(m_camera->get_image_size_in_bytes());
-    if (m_camera_info_msg != nullptr) {
-      m_camera_info_msg->header = m_compressed_img_msg->header;
-      m_cam_info_publisher->publish(*m_camera_info_msg);
-    }
-    RCLCPP_INFO(this->get_logger(), "take_and_send_image_mjpeg");
-  } else {
-    // grab the image, pass image msg buffer to fill
-    m_image_msg->width = m_camera->get_image_width();
-    m_image_msg->height = m_camera->get_image_height();
-    m_image_msg->encoding = "jpeg";
-    m_image_msg->step = m_camera->get_image_step();
-    if (m_image_msg->step == 0) {
-      // Some formats don't have a linesize specified by v4l2
-      // Fall back to manually calculating it step = size / height
-      m_image_msg->step = m_camera->get_image_size_in_bytes() / m_image_msg->height;
-    }
-    auto data_buf = m_camera->get_image();
-    m_image_msg->data.resize(m_camera->get_image_data_size());
-    memcpy(&m_image_msg->data[0], data_buf, m_camera->get_image_data_size());
-
-    auto stamp = m_camera->get_image_timestamp();
-    m_image_msg->header.stamp.sec = stamp.tv_sec;
-    m_image_msg->header.stamp.nanosec = stamp.tv_nsec;
-
-    m_image_publisher->publish(*m_image_msg);
-    if (m_camera_info_msg != nullptr) {
-      m_camera_info_msg->header = m_image_msg->header;
-      m_cam_info_publisher->publish(*m_camera_info_msg);
-    }
-    RCLCPP_INFO(this->get_logger(), "take_and_send_image_mjpeg /image");
+  m_compressed_image_publisher->publish(*m_compressed_img_msg);
+  m_compressed_img_msg->data.resize(m_camera->get_image_size_in_bytes());
+  if (m_camera_info_msg != nullptr) {
+    m_camera_info_msg->header = m_compressed_img_msg->header;
+    m_cam_info_publisher->publish(*m_camera_info_msg);
   }
+  RCLCPP_INFO(this->get_logger(), "take_and_send_image_mjpeg");
   return true;
 }
 
