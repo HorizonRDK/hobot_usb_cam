@@ -195,14 +195,12 @@ void HobotUsbCamNode::init()
   // start the camera
   m_camera->start();
 
-#ifdef USING_HBMEM
   // 创建hbmempub
   if (m_parameters.zero_copy) {
     hbmem_image_pub_1080_ =
-          this->create_publisher_hbmem<hbm_img_msgs::msg::HbmMsg1080P>(
+          this->create_publisher<hbm_img_msgs::msg::HbmMsg1080P>(
               "hbmem_img", 5);
   }
-#endif
   // TODO(lucasw) should this check a little faster than expected frame rate?
   // TODO(lucasw) how to do small than ms, or fractional ms- std::chrono::nanoseconds?
   const int period_ms = 1000 / m_parameters.framerate;
@@ -386,7 +384,6 @@ bool HobotUsbCamNode::take_and_send_image()
 
 bool HobotUsbCamNode::hbmem_take_and_send_image() {
   //static int mSendIdx = 0;
-#ifdef USING_HBMEM
   auto loanedMsg = hbmem_image_pub_1080_->borrow_loaned_message();
   if (loanedMsg.is_valid()) {
     auto& msg = loanedMsg.get();
@@ -412,7 +409,6 @@ bool HobotUsbCamNode::hbmem_take_and_send_image() {
     RCLCPP_WARN(rclcpp::get_logger("mipi_node"),
                 "borrow_loaned_message failed");
   }
-#endif
   return true;
 }
 

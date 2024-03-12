@@ -44,10 +44,8 @@
 
 #include "hobot_usb_cam/hobot_usb_cam.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
-#ifdef USING_HBMEM
 #include "hb_mem_mgr.h"
 #include "hbm_img_msgs/msg/hbm_msg1080_p.hpp"
-#endif
 
 #if ngy
 std::ostream & operator<<(std::ostream & ostr, const rclcpp::Time & tm)
@@ -101,10 +99,8 @@ public:
   rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr m_service_capture;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr m_parameters_callback_handle;
 
-#ifdef USING_HBMEM
   int32_t mSendIdx = 0;
-  rclcpp::PublisherHbmem<hbm_img_msgs::msg::HbmMsg1080P>::SharedPtr hbmem_image_pub_1080_;
-#endif
+  rclcpp::Publisher<hbm_img_msgs::msg::HbmMsg1080P>::SharedPtr hbmem_image_pub_1080_;
 };
 }  // namespace usb_cam
 #endif  // USB_CAM__USB_CAM_NODE_HPP_

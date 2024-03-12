@@ -29,11 +29,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic -Wl,--no-as-needed)
 endif()
 
-if(BUILD_HBMEM)
-add_definitions(-DUSING_HBMEM)
 find_package(hbm_img_msgs REQUIRED)
-endif()
-
 find_package(OpenCV REQUIRED)
 
 find_package(PkgConfig REQUIRED)
