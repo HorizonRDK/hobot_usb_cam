@@ -16,7 +16,9 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, TextSubstitution
 from launch_ros.actions import Node
-from launch_ros.actions import Node
+from launch.actions import IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from ament_index_python import get_package_share_directory
 from ament_index_python.packages import get_package_prefix
 import os
 
@@ -25,6 +27,13 @@ def generate_launch_description():
         get_package_prefix('hobot_usb_cam'),
         "lib/hobot_usb_cam/config/usb_camera_calibration.yaml")
     print("config_file_path is ", config_file_path)
+
+    shm_node = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(
+                get_package_share_directory('hobot_shm'),
+                'launch/hobot_shm.launch.py'))
+    )
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -63,6 +72,8 @@ def generate_launch_description():
             'usb_zero_copy',
             default_value='False',
             description='use zero copy or not'),
+        # 启动零拷贝环境配置node
+        shm_node,
         Node(
             package='hobot_usb_cam',
             executable='hobot_usb_cam',

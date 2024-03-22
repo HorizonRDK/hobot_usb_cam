@@ -77,6 +77,13 @@ def generate_launch_description():
 
 
     return LaunchDescription([
+        # 启动零拷贝环境配置node
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(
+                    get_package_share_directory('hobot_shm'),
+                    'launch/hobot_shm.launch.py'))
+        ),
         usb_cam_device_arg,
         usb_node,
         # image codec
