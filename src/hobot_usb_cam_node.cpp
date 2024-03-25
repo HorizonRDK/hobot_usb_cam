@@ -30,6 +30,8 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include "rcpputils/env.hpp"
+#include "rcutils/env.h"
 
 #include "hobot_usb_cam/hobot_usb_cam_node.hpp"
 #include "hobot_usb_cam/utils.hpp"
@@ -197,6 +199,22 @@ void HobotUsbCamNode::init()
 
   // 创建hbmempub
   if (m_parameters.zero_copy) {
+    std::string ros_zerocopy_env = rcpputils::get_env_var("RMW_FASTRTPS_USE_QOS_FROM_XML");
+    if (ros_zerocopy_env.empty()) {
+      RCLCPP_ERROR_STREAM(this->get_logger(),
+        "Launching with zero-copy, but env of `RMW_FASTRTPS_USE_QOS_FROM_XML` is not set. "
+        << "Transporting data without zero-copy!");
+    } else {
+      if ("1" == ros_zerocopy_env) {
+        RCLCPP_WARN_STREAM(this->get_logger(), "Enabling zero-copy");
+      } else {
+        RCLCPP_ERROR_STREAM(this->get_logger(),
+          "env of `RMW_FASTRTPS_USE_QOS_FROM_XML` is [" << ros_zerocopy_env
+          << "], which should be set to 1. "
+          << "Data transporting without zero-copy!");
+      }
+    }
+
     hbmem_image_pub_1080_ =
           this->create_publisher<hbm_img_msgs::msg::HbmMsg1080P>(
               "hbmem_img", 5);

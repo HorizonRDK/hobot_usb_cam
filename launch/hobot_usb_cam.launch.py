@@ -28,13 +28,6 @@ def generate_launch_description():
         "lib/hobot_usb_cam/config/usb_camera_calibration.yaml")
     print("config_file_path is ", config_file_path)
 
-    shm_node = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(
-                get_package_share_directory('hobot_shm'),
-                'launch/hobot_shm.launch.py'))
-    )
-
     return LaunchDescription([
         DeclareLaunchArgument(
             'usb_camera_calibration_file_path',
@@ -73,7 +66,12 @@ def generate_launch_description():
             default_value='False',
             description='use zero copy or not'),
         # 启动零拷贝环境配置node
-        shm_node,
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(
+                    get_package_share_directory('hobot_shm'),
+                    'launch/hobot_shm.launch.py'))
+        ),
         Node(
             package='hobot_usb_cam',
             executable='hobot_usb_cam',
