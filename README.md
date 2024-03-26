@@ -50,8 +50,8 @@ If the following information is output, it indicates that the node has been succ
 [hobot_usb_cam-1] If you need calibration msg, please make sure the calibration file path is correct and the calibration file exists!
 [hobot_usb_cam-1] [WARN] [1689676255.349211776] [hobot_usb_cam]: get camera calibration parameters failed
 [hobot_usb_cam-1] [WARN] [1689676255.349432974] [hobot_usb_cam]: Start to open device /dev/video8.
-```[hobot_usb_cam-1] [WARN] [1689676255.596271213] [hobot_usb_cam]: Open & Init device /dev/video8 success.
-
+[hobot_usb_cam-1] [WARN] [1689676255.596271213] [hobot_usb_cam]: Open & Init device /dev/video8 success.
+```
 ## View Effect
 
 Here we use the web interface to visualize the image. Open a new terminal for publishing the web service.
